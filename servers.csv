@@ -1,0 +1,7 @@
+id,vcpu,memory_gib,profile
+app-001,2,8,
+app-002,4,16,balanced
+db-001,8,64,memory
+etl-001,8,24,compute
+legacy-001,1,2,
+bigmem-001,64,3000,memory

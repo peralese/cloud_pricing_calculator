@@ -1,0 +1,80 @@
+# Byte-compiled / optimized / DLL files
+
+**pycache**/
+\*.py\[cod]
+\*\$py.class
+
+# Virtual environments
+
+.venv/
+env/
+venv/
+ENV/
+
+# Distribution / packaging
+
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+\*.egg-info/
+.installed.cfg
+\*.egg
+
+# PyInstaller
+
+\*.manifest
+\*.spec
+
+# Installer logs
+
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.\*
+.cache
+nosetests.xml
+coverage.xml
+\*.cover
+\*.py,cover
+.hypothesis/
+.pytest\_cache/
+
+# Jupyter Notebook
+
+.ipynb\_checkpoints
+
+# IDE settings
+
+.vscode/
+.idea/
+\*.swp
+\*.swo
+
+# dotenv environment variables
+
+.env
+
+# Local data / outputs
+
+output/
+\*.csv
+\*.xlsx
+
+# Mac/Windows system files
+
+.DS\_Store
+Thumbs.db
