@@ -6,7 +6,19 @@ import os
 import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from glob import glob
 
+def _find_latest_output(patterns=("output/recommend_*.csv", "output/recommend_*.xlsx")) -> Optional[Path]:
+    """
+    Return the newest file matching the given glob patterns, or None if not found.
+    """
+    candidates = []
+    for pat in patterns:
+        candidates.extend(glob(pat))
+    if not candidates:
+        return None
+    newest = max((Path(p) for p in candidates), key=lambda p: p.stat().st_mtime)
+    return newest
 # ---------- Output helpers ----------
 def make_output_path(cmd: str, user_out: Optional[str] = None) -> str:
     """
@@ -261,6 +273,8 @@ def cmd_recommend(args):
 
     catalog = fetch_instance_catalog(region)
     rows = read_rows(args.input, sheet=args.sheet)
+    if not rows:
+        raise SystemExit("❌ Input file has no rows.")
 
     out_rows = []
     for r in rows:
@@ -318,17 +332,37 @@ def cmd_recommend(args):
     print(f"Wrote recommendations → {out_path}")
 
 def cmd_price(args):
-    # Input path (prompt if omitted) and Excel sheet handling
+    # 1) If no --in was provided, try to auto-pick the newest recommendation output.
+        # Handle --latest flag explicitly
+    if getattr(args, "latest", False):
+        latest = _find_latest_output()
+        if not latest:
+            raise SystemExit("❌ --latest was set but no recommendation files found in ./output")
+        print(f"ℹ️  Using latest recommendation file (via --latest): {latest}")
+        args.input = str(latest)
+        args.sheet = _maybe_prompt_for_sheet(latest, args.sheet)
+
     if not args.input:
-        ipath = _prompt_for_input_path()
-        args.sheet = _maybe_prompt_for_sheet(ipath, args.sheet)
-        args.input = str(ipath)
+        latest = _find_latest_output()
+        if latest:
+            print(f"ℹ️  No --in provided. Using latest recommendation file: {latest}")
+            args.input = str(latest)
+            # Excel sheet prompt only applies if we picked an .xlsx file
+            args.sheet = _maybe_prompt_for_sheet(latest, args.sheet)
+        else:
+            # 2) Fall back to interactive prompt (CSV or Excel) if nothing in output/.
+            ipath = _prompt_for_input_path()
+            args.sheet = _maybe_prompt_for_sheet(ipath, args.sheet)
+            args.input = str(ipath)
     else:
         given = Path(args.input)
         args.sheet = _maybe_prompt_for_sheet(given, args.sheet)
 
+    # Read input (CSV/Excel)
     rows = read_rows(args.input, sheet=args.sheet)
-
+    if not rows:
+        raise SystemExit("❌ Input file has no rows.")
+    # Price rows
     out_rows = []
     for r in rows:
         itype = r.get("recommended_instance_type") or r.get("instance_type") or ""
@@ -338,6 +372,7 @@ def cmd_price(args):
             r["pricing_note"] = "Missing instance_type or region"
             out_rows.append(r)
             continue
+
         price = price_ec2_ondemand(itype, region, os_name=args.os)
         r["price_per_hour_usd"] = f"{price:.6f}" if price is not None else ""
         r["pricing_note"] = "" if price is not None else "No price found (check filters/region/OS)"
@@ -349,8 +384,11 @@ def cmd_price(args):
     if "pricing_note" not in fieldnames: fieldnames.append("pricing_note")
 
     out_path = make_output_path("price", args.output)
+    print(f"Input:  {args.input}")
+    print(f"Output: {out_path}")
     write_rows(out_path, out_rows, fieldnames)
     print(f"Wrote priced recommendations → {out_path}")
+
 
 def main():
     p = argparse.ArgumentParser(description="Recommend AWS EC2 types from CPU/RAM, then price them. (CSV or Excel input)")
@@ -369,6 +407,7 @@ def main():
     p2.add_argument("--in", dest="input", required=False, help="Input CSV/Excel (from recommend step)")
     p2.add_argument("--sheet", required=False, help="Excel sheet name (if input is .xlsx/.xls)")
     p2.add_argument("--out", dest="output", required=False, help="Output CSV (default: ./output/price_<timestamp>.csv)")
+    p2.add_argument("--latest", action="store_true",help="Use newest output/recommend_* and fail if none found")
     p2.set_defaults(func=cmd_price)
 
     args = p.parse_args()
