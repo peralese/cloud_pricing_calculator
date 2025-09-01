@@ -376,12 +376,22 @@ def cmd_price(args):
         price = price_ec2_ondemand(itype, region, os_name=args.os)
         r["price_per_hour_usd"] = f"{price:.6f}" if price is not None else ""
         r["pricing_note"] = "" if price is not None else "No price found (check filters/region/OS)"
+        if price is not None and not getattr(args, "no_monthly", False):
+            monthly = price * float(args.hours_per_month)
+            r["monthly_cost_usd"] = f"{monthly:.2f}"
+        else:
+            # Keep column present but empty (useful for consistent schemas)
+            if not getattr(args, "no_monthly", False):
+                r["monthly_cost_usd"] = ""
+
         out_rows.append(r)
 
     # Preserve columns + add pricing fields if absent
     fieldnames = list(out_rows[0].keys()) if out_rows else []
     if "price_per_hour_usd" not in fieldnames: fieldnames.append("price_per_hour_usd")
     if "pricing_note" not in fieldnames: fieldnames.append("pricing_note")
+    bif not getattr(args, "no_monthly", False) and "monthly_cost_usd" not in fieldnames:
+        fieldnames.append("monthly_cost_usd")
 
     out_path = make_output_path("price", args.output)
     print(f"Input:  {args.input}")
@@ -408,6 +418,8 @@ def main():
     p2.add_argument("--sheet", required=False, help="Excel sheet name (if input is .xlsx/.xls)")
     p2.add_argument("--out", dest="output", required=False, help="Output CSV (default: ./output/price_<timestamp>.csv)")
     p2.add_argument("--latest", action="store_true",help="Use newest output/recommend_* and fail if none found")
+    p2.add_argument("--hours-per-month", type=float, default=730.0, help="Hours used to compute monthly cost (default: 730)")
+    p2.add_argument("--no-monthly", action="store_true", help="Do not compute monthly cost column")
     p2.set_defaults(func=cmd_price)
 
     args = p.parse_args()
