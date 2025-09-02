@@ -1,7 +1,3 @@
-id,vcpu,memory_gib,profile
-app-001,2,8,
-app-002,4,16,balanced
-db-001,8,64,memory
-etl-001,8,24,compute
-legacy-001,1,2,
-bigmem-001,64,3000,memory
+id,vcpu,memory_gib,profile,os,license_model,ebs_gb,ebs_type,s3_gb,network_profile,db_engine,db_instance_class,db_storage_gb,multi_az,region,recommended_instance_type
+app-001,4,16,balanced,Windows,AWS,350,gp3,100,Medium,Postgres,db.m5.large,100,Yes,us-east-1,m5.xlarge
+app-002,2,8,,RHEL,BYOL,50,gp3,0,Low,,,,,us-east-1,t3.large

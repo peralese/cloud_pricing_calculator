@@ -7,6 +7,27 @@ import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from glob import glob
+import math
+from decimal import Decimal
+
+# ---------- Cost model defaults (override via env if desired) ----------
+# S3 Standard storage ($/GB-month)
+S3_STD_GB_MONTH = float(os.getenv("S3_STD_GB_MONTH", "0.023"))
+
+# EBS gp3 storage ($/GB-month). (Simplified: size-only; you can later add IOPS/throughput add-ons)
+EBS_GP3_GB_MONTH = float(os.getenv("EBS_GP3_GB_MONTH", "0.08"))
+# EBS io1 storage ($/GB-month)  (optional alternative)
+EBS_IO1_GB_MONTH = float(os.getenv("EBS_IO1_GB_MONTH", "0.125"))
+
+# Data transfer out to internet baseline ($/GB) – simplified
+DTO_GB_PRICE = float(os.getenv("DTO_GB_PRICE", "0.09"))
+
+# Network profile → assumed egress GB/month (tune to your environment)
+NETWORK_PROFILE_TO_GB = {
+    "low":   float(os.getenv("NETWORK_EGRESS_GB_LOW", "50")),
+    "medium":float(os.getenv("NETWORK_EGRESS_GB_MED", "500")),
+    "high":  float(os.getenv("NETWORK_EGRESS_GB_HIGH", "5000")),
+}
 
 def _find_latest_output(patterns=("output/recommend_*.csv", "output/recommend_*.xlsx")) -> Optional[Path]:
     """
@@ -39,6 +60,34 @@ try:
     load_dotenv()
 except Exception:
     pass
+
+def _as_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def _as_int(x, default=0):
+    try:
+        if x is None or x == "":
+            return default
+        return int(float(x))
+    except Exception:
+        return default
+
+def _as_bool(x, default=False):
+    if isinstance(x, bool):
+        return x
+    if x is None:
+        return default
+    s = str(x).strip().lower()
+    if s in {"y","yes","true","1"}:
+        return True
+    if s in {"n","no","false","0"}:
+        return False
+    return default
 
 # ---------- Lazy imports ----------
 def _lazy_boto3():
@@ -201,6 +250,58 @@ def price_ec2_ondemand(instance_type: str, region: str, os_name: str = "Linux") 
                         except ValueError:
                             pass
     return None
+def _pricing_first_usd(pl_obj: dict) -> Optional[float]:
+    # Extract first USD "Hrs" or "Quantity" price from a PriceList product
+    for term in pl_obj.get("terms", {}).get("OnDemand", {}).values():
+        for dim in term.get("priceDimensions", {}).values():
+            usd = dim.get("pricePerUnit", {}).get("USD")
+            unit = dim.get("unit")
+            if usd and unit in {"Hrs", "Quantity"}:
+                try:
+                    return float(usd)
+                except Exception:
+                    pass
+    return None
+
+def price_rds_ondemand(engine: str, instance_class: str, region: str, license_model: str = "AWS", multi_az: bool = False) -> Optional[float]:
+    """
+    Returns hourly USD On-Demand for an RDS instance.
+    engine: 'Postgres', 'MySQL', 'SQLServer', etc.
+    instance_class: e.g., 'db.m5.large'
+    license_model: 'AWS' (license-included) or 'BYOL'
+    multi_az: True/False
+    """
+    boto3 = _lazy_boto3()
+    location = AWS_REGION_TO_LOCATION.get(region)
+    if not location:
+        return None
+
+    # Map our license_model to RDS "licenseModel" field
+    lm = "License included" if (str(license_model).strip().lower() != "byol") else "Bring your own license"
+    dep = "Multi-AZ" if multi_az else "Single-AZ"
+
+    pricing = boto3.client("pricing", region_name="us-east-1")
+    filters = [
+        {"Type":"TERM_MATCH","Field":"location","Value":location},
+        {"Type":"TERM_MATCH","Field":"databaseEngine","Value":engine},
+        {"Type":"TERM_MATCH","Field":"instanceType","Value":instance_class},
+        {"Type":"TERM_MATCH","Field":"deploymentOption","Value":dep},
+        {"Type":"TERM_MATCH","Field":"licenseModel","Value":lm},
+    ]
+    try:
+        resp = pricing.get_products(ServiceCode="AmazonRDS", Filters=filters, MaxResults=100)
+    except Exception:
+        return None
+
+    for pl in resp.get("PriceList", []):
+        try:
+            o = json.loads(pl)
+        except Exception:
+            continue
+        usd = _pricing_first_usd(o)
+        if usd is not None:
+            return usd
+    return None
 
 # ---------- I/O (CSV + Excel) ----------
 def _prompt_for_input_path() -> Path:
@@ -307,7 +408,9 @@ def cmd_recommend(args):
                 else:
                     fit_reason = "no-fit-fallback"
 
-        out_rows.append({
+        base = dict(r)  # carry ALL original columns through
+
+        base.update({
             "id": rid,
             "requested_vcpu": vcpu,
             "requested_memory_gib": mem_gib,
@@ -321,15 +424,25 @@ def cmd_recommend(args):
             "fit_reason": fit_reason,
             "note": "" if chosen else "No matching current-gen x86_64 found; consider GPU/ARM or older-gen.",
         })
+        out_rows.append(base)
+    
+    out_path = make_output_path("recommend", args.output)
 
-    fieldnames = [
+    preferred = [
         "id","requested_vcpu","requested_memory_gib","profile","region",
         "recommended_instance_type","rec_vcpu","rec_memory_gib",
         "overprov_vcpu","overprov_mem_gib","fit_reason","note"
     ]
-    out_path = make_output_path("recommend", args.output)
+
+    # Collect every key that appears in any row
+    all_keys = {k for row in out_rows for k in row.keys()}
+
+    # Start with preferred order, then append anything else
+    fieldnames = preferred + [k for k in all_keys if k not in preferred]
+
     write_rows(out_path, out_rows, fieldnames)
     print(f"Wrote recommendations → {out_path}")
+
 
 def cmd_price(args):
     # 1) If no --in was provided, try to auto-pick the newest recommendation output.
@@ -365,39 +478,118 @@ def cmd_price(args):
     # Price rows
     out_rows = []
     for r in rows:
+        # --------- Inputs from row (with safe defaults) ----------
         itype = r.get("recommended_instance_type") or r.get("instance_type") or ""
-        region = r.get("region") or args.region
-        if not itype or not region:
-            r["price_per_hour_usd"] = ""
+        region_row = r.get("region") or args.region
+        os_row = (r.get("os") or args.os or "Linux").strip()
+        license_model = (r.get("license_model") or "AWS").strip()  # 'AWS' or 'BYOL'
+        ebs_gb = _as_float(r.get("ebs_gb"), 0.0)
+        ebs_type = (r.get("ebs_type") or "gp3").strip()
+        ebs_iops = _as_int(r.get("ebs_iops"), 0)  # currently unused in simplified model
+        s3_gb = _as_float(r.get("s3_gb"), 0.0)
+        net_prof = (r.get("network_profile") or "").strip()
+        db_engine = (r.get("db_engine") or "").strip()
+        db_class = (r.get("db_instance_class") or "").strip()
+        db_storage_gb = _as_float(r.get("db_storage_gb"), 0.0)  # not charged separately here; could be added later via pricing API
+        db_multi_az = _as_bool(r.get("multi_az"), False)
+
+        # --------- Compute OS to use for EC2 compute price ----------
+        # If BYOL → charge compute at Linux rate (no OS uplift). Else use declared OS.
+        os_for_compute = "Linux" if license_model.lower() == "byol" else os_row
+
+        # --------- EC2 hourly price ----------
+        if not itype or not region_row:
+            # Missing required fields for compute pricing
+            compute_price = None
             r["pricing_note"] = "Missing instance_type or region"
-            out_rows.append(r)
-            continue
-
-        price = price_ec2_ondemand(itype, region, os_name=args.os)
-        r["price_per_hour_usd"] = f"{price:.6f}" if price is not None else ""
-        r["pricing_note"] = "" if price is not None else "No price found (check filters/region/OS)"
-        if price is not None and not getattr(args, "no_monthly", False):
-            monthly = price * float(args.hours_per_month)
-            r["monthly_cost_usd"] = f"{monthly:.2f}"
         else:
-            # Keep column present but empty (useful for consistent schemas)
-            if not getattr(args, "no_monthly", False):
-                r["monthly_cost_usd"] = ""
+            compute_price = price_ec2_ondemand(itype, region_row, os_name=os_for_compute)
+            if compute_price is None:
+                r["pricing_note"] = "No EC2 price found (check filters/region/OS)"
+            else:
+                r["pricing_note"] = r.get("pricing_note","")
 
+        # --------- Monthly compute ----------
+        hours = float(args.hours_per_month)
+        compute_monthly = monthly_compute_cost(compute_price, hours)
+
+        if getattr(args, "no_monthly", False):
+            r["price_per_hour_usd"] = f"{compute_price:.6f}" if compute_price is not None else ""
+            # blank all monthly columns when --no-monthly is set
+            r["monthly_compute_usd"] = ""
+            r["monthly_ebs_usd"] = ""
+            r["monthly_s3_usd"] = ""
+            r["monthly_network_usd"] = ""
+            r["monthly_db_usd"] = ""
+            r["monthly_total_usd"] = ""
+        else:
+            r["price_per_hour_usd"] = f"{compute_price:.6f}" if compute_price is not None else ""
+            r["monthly_compute_usd"] = f"{compute_monthly:.2f}"
+            r["monthly_ebs_usd"] = f"{monthly_ebs_cost(ebs_gb, ebs_type):.2f}"
+            r["monthly_s3_usd"] = f"{monthly_s3_cost(s3_gb):.2f}"
+            r["monthly_network_usd"] = f"{monthly_network_cost(net_prof):.2f}"
+            if db_engine and db_class and region_row:
+                db_monthly = monthly_rds_cost(db_engine, db_class, region_row, license_model, db_multi_az, hours)
+            else:
+                db_monthly = 0.0
+            r["monthly_db_usd"] = f"{db_monthly:.2f}"
+            parts = [
+                _as_float(r["monthly_compute_usd"], 0.0),
+                _as_float(r["monthly_ebs_usd"], 0.0),
+                _as_float(r["monthly_s3_usd"], 0.0),
+                _as_float(r["monthly_network_usd"], 0.0),
+                _as_float(r["monthly_db_usd"], 0.0),
+            ]
+            r["monthly_total_usd"] = f"{sum(parts):.2f}"
+                    
         out_rows.append(r)
 
     # Preserve columns + add pricing fields if absent
     fieldnames = list(out_rows[0].keys()) if out_rows else []
-    if "price_per_hour_usd" not in fieldnames: fieldnames.append("price_per_hour_usd")
-    if "pricing_note" not in fieldnames: fieldnames.append("pricing_note")
-    bif not getattr(args, "no_monthly", False) and "monthly_cost_usd" not in fieldnames:
-        fieldnames.append("monthly_cost_usd")
+    for col in [
+        "price_per_hour_usd",
+        "monthly_compute_usd",
+        "monthly_ebs_usd",
+        "monthly_s3_usd",
+        "monthly_network_usd",
+        "monthly_db_usd",
+        "monthly_total_usd",
+        "pricing_note",
+    ]:
+        if col not in fieldnames:
+            fieldnames.append(col)
 
     out_path = make_output_path("price", args.output)
     print(f"Input:  {args.input}")
     print(f"Output: {out_path}")
     write_rows(out_path, out_rows, fieldnames)
     print(f"Wrote priced recommendations → {out_path}")
+
+def monthly_compute_cost(price_per_hour: Optional[float], hours: float) -> float:
+    return round((price_per_hour or 0.0) * hours, 2)
+
+def monthly_ebs_cost(ebs_gb: float, ebs_type: str = "gp3") -> float:
+    et = (ebs_type or "gp3").strip().lower()
+    if et == "io1":
+        rate = EBS_IO1_GB_MONTH
+    else:
+        rate = EBS_GP3_GB_MONTH
+    return round(max(0.0, ebs_gb) * rate, 2)
+
+def monthly_s3_cost(s3_gb: float) -> float:
+    return round(max(0.0, s3_gb) * S3_STD_GB_MONTH, 2)
+
+def monthly_network_cost(profile: str) -> float:
+    if not profile:
+        return 0.0
+    gb = NETWORK_PROFILE_TO_GB.get(profile.strip().lower())
+    if gb is None:
+        return 0.0
+    return round(gb * DTO_GB_PRICE, 2)
+
+def monthly_rds_cost(engine: str, instance_class: str, region: str, license_model: str, multi_az: bool, hours: float) -> float:
+    p = price_rds_ondemand(engine, instance_class, region, license_model=license_model, multi_az=multi_az)
+    return round((p or 0.0) * hours, 2)
 
 
 def main():

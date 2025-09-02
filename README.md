@@ -9,11 +9,17 @@ Supports **CSV** and **Excel** input, interactive prompts for missing parameters
 
 - **Input formats**: Accepts `.csv` and `.xlsx`/`.xls`
 - **Interactive prompts**: If no `--in` file is passed, you are prompted for a path (and Excel sheet name if needed)
-- **Output management**: Results are written to `./output/` with timestamped filenames (e.g. `recommend_20250830-213045.csv`)
+- **Output management**: Results are written to `./output/` with timestamped filenames (e.g. `recommend_20250901-213045.csv`)
 - **EC2 recommendations**: Matches requirements against current-generation, x86_64 instance families (balanced, compute, memory)
 - **Diagnostics**: Adds transparency columns (`overprov_vcpu`, `overprov_mem_gib`, `fit_reason`) to show why a type was chosen
 - **Pricing**: Fetches On-Demand hourly rates from the AWS Pricing API
-- **Monthly costs**: Optionally computes `monthly_cost_usd` using configurable hours-per-month (default 730)
+- **Multi-dimension monthly costs**: Computes estimates for:
+  - Compute (instance hourly → monthly)
+  - OS & licensing (AWS license-included vs BYOL)
+  - Block storage (EBS gp3/io1, $/GB-month)
+  - Object storage (S3 Standard, $/GB-month)
+  - Networking (Low/Medium/High egress profiles)
+  - Database (RDS engines, instance size, Multi-AZ)
 - **Extensible**: Architecture allows adding new checks and cost factors
 
 ---
