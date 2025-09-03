@@ -23,7 +23,6 @@ Supports **CSV** and **Excel** input, interactive prompts for missing parameters
 - **Extensible**: Architecture allows adding new checks and cost factors
 
 ---
-
 ## Usage
 
 ### Install dependencies
@@ -70,16 +69,47 @@ python auto_instance_recommender.py price --region us-east-1 --in ./output/recom
 
 ---
 
+---
+
+## Input Schema
+
+The input CSV/Excel must contain at least:
+
+- `id` – application/server identifier  
+- `vcpu` – number of vCPUs  
+- `memory_gib` – memory in GiB  
+- `profile` – workload profile (`balanced`, `compute`, `memory`)  
+
+Optional expanded fields for pricing:
+
+- `os` – `Linux`, `Windows`, `RHEL`, `SUSE`  
+- `license_model` – `AWS` (license-included) or `BYOL`  
+- `ebs_gb` – total EBS GB (across volumes of same type)  
+- `ebs_type` – `gp3`, `io1`, `st1`  
+- `ebs_iops` – provisioned IOPS (gp3/io1, optional)  
+- `s3_gb` – object storage GB (S3 Standard)  
+- `network_profile` – `Low`, `Medium`, `High` (maps to assumed egress GB/month)  
+- `db_engine` – `Postgres`, `MySQL`, `SQLServer`, etc.  
+- `db_instance_class` – RDS instance class (e.g., `db.m5.large`)  
+- `db_storage_gb` – DB storage GB  
+- `multi_az` – `Yes`/`No`  
+
+---
 ## Output
 
 - **Recommendations**: `./output/recommend_<timestamp>.csv`  
-  Includes requested resources, profile, chosen instance, overprovision metrics, and fit reason.  
+  Includes requested resources, chosen instance, overprovision metrics, fit reason, plus all carried-through input columns.
 
 - **Pricing**: `./output/price_<timestamp>.csv`  
-  Extends recommendations with:  
-  - Hourly cost (`price_per_hour_usd`)  
-  - Monthly cost (`monthly_cost_usd`, unless `--no-monthly` is used)  
-  - Pricing notes  
+  Extends recommendations with cost breakdown:  
+  - `price_per_hour_usd`  
+  - `monthly_compute_usd`  
+  - `monthly_ebs_usd`  
+  - `monthly_s3_usd`  
+  - `monthly_network_usd`  
+  - `monthly_db_usd`  
+  - `monthly_total_usd`  
+  - `pricing_note`  
 
 ---
 
@@ -93,21 +123,15 @@ python auto_instance_recommender.py price --region us-east-1 --in ./output/recom
    - `price` automatically looks in the `./output` folder for the most recent recommendation file if no `--in` is provided.  
    - `--latest` flag enforces strict newest-file mode.  
 
-3. **Server metadata awareness**  
-   - Include attributes like **underlying OS** by default.  
-   - Use OS to influence pricing (Linux vs Windows).  
+3. **Server metadata awareness (done)**  
+   - Supports OS awareness (`Linux`, `Windows`, `RHEL`, `SUSE`) and BYOL licensing model.  
 
-4. **Additional cost dimensions**  
-   Recommend adding checks for:  
-   - **Storage requirements** (EBS size/IOPS, gp3 vs io1).  
-   - **Network throughput** (bandwidth tiers by instance family).  
-   - **Licensing costs** (SQL Server, RHEL, SUSE).  
-   - **Dedicated tenancy** pricing differences.  
-   - **Spot instance pricing** as an alternative.  
+4. **Additional cost dimensions (done)**  
+   - Block storage, object storage, networking, database costs now included.  
 
 5. **Monthly cost output (done)**  
-   - Pricing step now computes **monthly cost** per server (default 730 hours).  
-   - User can configure hours or disable monthly column.  
+   - Pricing step computes **monthly cost** per server (default 730 hours).  
+   - User can configure hours or disable monthly columns.  
 
 6. **Enhanced Excel integration**  
    - Auto-detect multiple sheets and process them in batch.  
@@ -128,25 +152,24 @@ python auto_instance_recommender.py price --region us-east-1 --in ./output/recom
 1. Prepare an input CSV:
 
 ```csv
-id,vcpu,memory_gib,profile
-app-001,2,8,balanced
-db-001,8,64,memory
-etl-001,8,24,
+id,vcpu,memory_gib,profile,os,license_model,ebs_gb,ebs_type,s3_gb,network_profile,db_engine,db_instance_class,db_storage_gb,multi_az
+app-001,4,16,balanced,Windows,AWS,350,gp3,100,Medium,Postgres,db.m5.large,100,Yes
+app-002,2,8,,RHEL,BYOL,50,gp3,0,Low,,,,No
+
 ```
 
 2. Run recommender:
 
 ```bash
-python auto_instance_recommender.py recommend --region us-east-1 --in apps.csv
+python auto_instance_recommender.py recommend --region us-east-1 --in servers.csv
+
 ```
 
 3. Run pricer:
 
 ```bash
-python auto_instance_recommender.py price --region us-east-1
+python auto_instance_recommender.py price --region us-east-1 --latest
 ```
-
----
 
 ## 📌 License
 
