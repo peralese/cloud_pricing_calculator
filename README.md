@@ -1,7 +1,8 @@
-# Auto Instance Recommender
+# Cloud Pricing Calculator
 
-A Python tool that recommends AWS EC2 instance types based on CPU and memory requirements, and retrieves On-Demand pricing.  
-Supports **CSV** and **Excel** input, interactive prompts for missing parameters, and outputs results into a standardized `./output/` directory with timestamped filenames.
+A Python tool that recommends instance types and retrieves pricing for cloud workloads.  
+Currently supports **AWS EC2** recommendations and pricing end-to-end, with **Azure VM** support in progress.  
+Accepts **CSV** and **Excel** input, interactive prompts for missing parameters, and outputs results into a standardized `./output/` directory with timestamped filenames.
 
 ---
 
@@ -10,9 +11,9 @@ Supports **CSV** and **Excel** input, interactive prompts for missing parameters
 - **Input formats**: Accepts `.csv` and `.xlsx`/`.xls`
 - **Interactive prompts**: If no `--in` file is passed, you are prompted for a path (and Excel sheet name if needed)
 - **Output management**: Results are written to `./output/` with timestamped filenames (e.g. `recommend_20250901-213045.csv`)
-- **EC2 recommendations**: Matches requirements against current-generation, x86_64 instance families (balanced, compute, memory)
+- **AWS EC2 recommendations**: Matches requirements against current-generation, x86_64 instance families (`balanced`, `compute`, `memory`)
 - **Diagnostics**: Adds transparency columns (`overprov_vcpu`, `overprov_mem_gib`, `fit_reason`) to show why a type was chosen
-- **Pricing**: Fetches On-Demand hourly rates from the AWS Pricing API
+- **AWS Pricing**: Fetches On-Demand hourly rates from the AWS Pricing API
 - **Multi-dimension monthly costs**: Computes estimates for:
   - Compute (instance hourly → monthly)
   - OS & licensing (AWS license-included vs BYOL)
@@ -20,41 +21,46 @@ Supports **CSV** and **Excel** input, interactive prompts for missing parameters
   - Object storage (S3 Standard, $/GB-month)
   - Networking (Low/Medium/High egress profiles)
   - Database (RDS engines, instance size, Multi-AZ)
-- **Extensible**: Architecture allows adding new checks and cost factors
+- **Extensible**: Architecture split into `main.py`, `recommender.py`, and `pricing.py` for easier extension
+- **Azure support**: VM recommendations and pricing coming soon
 
 ---
+
 ## Usage
 
 ### Install dependencies
 
 ```bash
 pip install boto3 pandas openpyxl python-dotenv
+
 ```
 
 ### Recommend instances
 
 ```bash
-python auto_instance_recommender.py recommend --region us-east-1 --in apps.csv
+python main.py recommend --cloud aws --region us-east-1 --in apps.csv
 ```
 
 Or with Excel:
 
 ```bash
-python auto_instance_recommender.py recommend --region us-east-1 --in apps.xlsx --sheet Sheet1
+python main.py recommend --cloud aws --region us-east-1 --in apps.xlsx --sheet Sheet1
 ```
 
 If you omit `--in`, you will be prompted interactively.
 
-### Price recommendations
+### Price recommendations (AWS)
 
 ```bash
 # Auto-picks latest recommend_*.csv if --in omitted
-python auto_instance_recommender.py price --region us-east-1
-```
+python main.py price --cloud aws --region us-east-1
 
-```bash
 # Strict: fail if no recommendation file found
-python auto_instance_recommender.py price --region us-east-1 --latest
+python main.py price --cloud aws --region us-east-1 --latest
+
+# Explicit file
+python main.py price --cloud aws --region us-east-1 --in ./output/recommend_20250830-213045.csv
+
 ```
 
 ```bash
@@ -115,36 +121,40 @@ Optional expanded fields for pricing:
 
 ## Roadmap
 
-1. **Guardrails (already noted)**  
-   - Add logic to flag extreme overprovisioning (e.g., >4× requested resources).  
-   - Suggest alternate strategies (e.g., splitting workload, different family).  
 
-2. **Improve pricing input defaults (done)**  
-   - `price` automatically looks in the `./output` folder for the most recent recommendation file if no `--in` is provided.  
-   - `--latest` flag enforces strict newest-file mode.  
+- [x] **Guardrails**  
+  Flag extreme overprovisioning (e.g., >4× requested resources) and provide fit transparency (`cpu-bound`, `memory-bound`, `exact`).
 
-3. **Server metadata awareness (done)**  
-   - Supports OS awareness (`Linux`, `Windows`, `RHEL`, `SUSE`) and BYOL licensing model.  
+- [x] **Pricing input defaults**  
+  `price` automatically looks in the `./output` folder for the most recent recommendation file if no `--in` is provided.  
+  `--latest` flag enforces strict newest-file mode.
 
-4. **Additional cost dimensions (done)**  
-   - Block storage, object storage, networking, database costs now included.  
+- [x] **Server metadata awareness**  
+  Supports OS awareness (`Linux`, `Windows`, `RHEL`, `SUSE`) and BYOL licensing model.
 
-5. **Monthly cost output (done)**  
-   - Pricing step computes **monthly cost** per server (default 730 hours).  
-   - User can configure hours or disable monthly columns.  
+- [x] **Additional cost dimensions**  
+  Block storage, object storage, networking, and database costs now included.
 
-6. **Enhanced Excel integration**  
-   - Auto-detect multiple sheets and process them in batch.  
-   - Retain formatting when writing results back to Excel.  
+- [x] **Monthly cost output**  
+  Pricing step computes **monthly cost** per server (default 730 hours).  
+  User can configure hours or disable monthly columns.
 
-7. **Visualization & reporting**  
-   - Generate charts (CPU vs memory vs price scatterplot).  
-   - Summarize costs by region or profile type.  
+- [ ] **Azure support (coming soon)**  
+  Add VM sizing and pricing for Microsoft Azure.
 
-8. **Automation hooks**  
-   - Add option to push outputs to **S3** or **Google Sheets**.  
-   - Enable integration with migration tracking tools (e.g., ServiceNow export).  
+- [ ] **Enhanced Excel integration**  
+  Auto-detect multiple sheets and process them in batch.  
+  Retain formatting when writing results back to Excel.
 
+- [ ] **Visualization & reporting**  
+  Generate charts (CPU vs memory vs price scatterplots).  
+  Summarize costs by region, profile type, or OS.  
+  Build cost breakdown dashboards.
+
+- [ ] **Automation hooks**  
+  Add option to push outputs to **S3** or **Google Sheets**.  
+  Enable integration with migration tracking tools (e.g., ServiceNow, CMDB).
+ 
 ---
 
 ## Example Workflow
@@ -161,14 +171,14 @@ app-002,2,8,,RHEL,BYOL,50,gp3,0,Low,,,,No
 2. Run recommender:
 
 ```bash
-python auto_instance_recommender.py recommend --region us-east-1 --in servers.csv
+python main.py recommend --cloud aws --region us-east-1 --in servers.csv
 
 ```
 
 3. Run pricer:
 
 ```bash
-python auto_instance_recommender.py price --region us-east-1 --latest
+python main.py price --cloud aws --region us-east-1 --latest
 ```
 
 ## 📌 License
