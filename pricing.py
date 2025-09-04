@@ -1,10 +1,9 @@
 # pricing.py
-import csv, sys
+import csv, sys, json, os
 from pathlib import Path
 from typing import Optional, List
 
-# ---- Cost model defaults (env overrides welcome) ----
-import os
+# ---------- Cost model defaults ----------
 S3_STD_GB_MONTH = float(os.getenv("S3_STD_GB_MONTH", "0.023"))
 EBS_GP3_GB_MONTH = float(os.getenv("EBS_GP3_GB_MONTH", "0.08"))
 EBS_IO1_GB_MONTH = float(os.getenv("EBS_IO1_GB_MONTH", "0.125"))
@@ -15,54 +14,14 @@ NETWORK_PROFILE_TO_GB = {
     "high":  float(os.getenv("NETWORK_EGRESS_GB_HIGH", "5000")),
 }
 
-def as_float(x, default=0.0):
+# ---------- I/O ----------
+def _lazy_pandas():
     try:
-        if x is None or x == "": return default
-        return float(x)
-    except Exception:
-        return default
-
-def as_int(x, default=0):
-    try:
-        if x is None or x == "": return default
-        return int(float(x))
-    except Exception:
-        return default
-
-def as_bool(x, default=False):
-    if isinstance(x, bool): return x
-    if x is None: return default
-    s = str(x).strip().lower()
-    if s in {"y","yes","true","1"}: return True
-    if s in {"n","no","false","0"}: return False
-    return default
-
-def find_latest_output(patterns=("output/recommend_*.csv","output/recommend_*.xlsx")) -> Optional[Path]:
-    from glob import glob
-    candidates: List[str] = []
-    for pat in patterns: candidates.extend(glob(pat))
-    if not candidates: return None
-    return max((Path(p) for p in candidates), key=lambda p: p.stat().st_mtime)
-
-def prompt_for_input_path() -> Path:
-    print("Enter the path to your input file (.csv, .xlsx, or .xls):")
-    while True:
-        raw = input("> ").strip().strip('"').strip("'")
-        if not raw:
-            print("Please provide a file path."); continue
-        p = Path(raw).expanduser()
-        if not p.exists():
-            print(f"❌ File not found: {p}\nTry again:"); continue
-        if p.suffix.lower() not in {".csv",".xlsx",".xls"}:
-            print("❌ Unsupported file type. Please provide .csv, .xlsx, or .xls"); continue
-        return p
-
-def maybe_prompt_for_sheet(path: Path, sheet: Optional[str]) -> Optional[str]:
-    if path.suffix.lower() in {".xlsx",".xls"} and not sheet:
-        print("Excel file detected. Enter a sheet name (or press Enter for the first sheet):")
-        s = input("> ").strip()
-        return s or None
-    return sheet
+        import pandas as pd
+        return pd
+    except ImportError:
+        print("Excel input requested but pandas is missing. Install with:\n  pip install pandas openpyxl", file=sys.stderr)
+        sys.exit(1)
 
 def read_rows(path: str, sheet: Optional[str] = None) -> List[dict]:
     p = Path(path); suffix = p.suffix.lower()
@@ -70,11 +29,7 @@ def read_rows(path: str, sheet: Optional[str] = None) -> List[dict]:
         with open(p, newline="", encoding="utf-8") as f:
             return list(csv.DictReader(f))
     elif suffix in {".xlsx",".xls"}:
-        try:
-            import pandas as pd
-        except ImportError:
-            print("Excel input requested but pandas is missing. Install with:\n  pip install pandas openpyxl", file=sys.stderr)
-            sys.exit(1)
+        pd = _lazy_pandas()
         try:
             df = pd.read_excel(p, sheet_name=sheet if sheet is not None else 0)
         except Exception as e:
@@ -91,7 +46,15 @@ def write_rows(path: str, rows: List[dict], fieldnames: List[str]) -> None:
         w.writeheader()
         for r in rows: w.writerow(r)
 
-# ---- AWS Pricing ----
+# ---------- AWS pricing ----------
+def _lazy_boto3():
+    try:
+        import boto3
+        return boto3
+    except ImportError:
+        print("This feature requires boto3. Install with: pip install boto3", file=sys.stderr)
+        sys.exit(1)
+
 AWS_REGION_TO_LOCATION = {
     "us-east-1": "US East (N. Virginia)", "us-east-2": "US East (Ohio)",
     "us-west-1": "US West (N. California)", "us-west-2": "US West (Oregon)",
@@ -119,7 +82,7 @@ def _pricing_first_usd(pl_obj: dict) -> Optional[float]:
     return None
 
 def price_ec2_ondemand(instance_type: str, region: str, os_name: str = "Linux") -> Optional[float]:
-    import json, boto3
+    boto3 = _lazy_boto3()
     location = AWS_REGION_TO_LOCATION.get(region)
     if not location: return None
     pricing = boto3.client("pricing", region_name="us-east-1")
@@ -139,7 +102,7 @@ def price_ec2_ondemand(instance_type: str, region: str, os_name: str = "Linux") 
     return None
 
 def price_rds_ondemand(engine: str, instance_class: str, region: str, license_model: str = "AWS", multi_az: bool = False) -> Optional[float]:
-    import json, boto3
+    boto3 = _lazy_boto3()
     location = AWS_REGION_TO_LOCATION.get(region)
     if not location: return None
     lm = "License included" if (str(license_model).strip().lower() != "byol") else "Bring your own license"
@@ -165,7 +128,42 @@ def price_rds_ondemand(engine: str, instance_class: str, region: str, license_mo
         if usd is not None: return usd
     return None
 
-# ---- Monthly calculators ----
+# ---------- Azure pricing ----------
+# Optional override file: ./prices/azure_compute_prices.json
+# [{"region":"eastus","sku":"Standard_D4s_v5","os":"linux","license_model":"BYOL","hourly":0.20}, ...]
+def _azure_price_override(region: str, sku: str, os_name: str, license_model: str) -> Optional[float]:
+    p = Path("prices/azure_compute_prices.json")
+    if not p.exists(): return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            rows = json.load(f)
+        for r in rows:
+            if (r.get("region")==region and r.get("sku")==sku
+                and r.get("os","linux").lower()==os_name.lower()
+                and r.get("license_model","BYOL").upper()==license_model.upper()):
+                return float(r["hourly"])
+    except Exception:
+        return None
+    return None
+
+_AZ_BASE_DEFAULT_HOURLY = float(os.getenv("AZURE_BASE_DEFAULT_HOURLY", "0.20"))
+_AZ_OS_UPLIFT = {
+    "linux": 0.00,
+    "windows": 0.12,
+    "rhel": 0.09,
+    "suse": 0.07,
+}
+
+def azure_vm_price_hourly(region: str, sku: str, os_name: str, license_model: str) -> float:
+    o = _azure_price_override(region, sku, os_name, license_model)
+    if o is not None:
+        return o
+    uplift = _AZ_OS_UPLIFT.get(os_name.strip().lower(), 0.0)
+    if str(license_model).strip().lower() != "byol":
+        uplift += 0.01
+    return _AZ_BASE_DEFAULT_HOURLY + uplift
+
+# ---------- Monthly calculators ----------
 def monthly_compute_cost(price_per_hour: Optional[float], hours: float) -> float:
     return round((price_per_hour or 0.0) * hours, 2)
 
@@ -186,4 +184,5 @@ def monthly_network_cost(profile: str) -> float:
 def monthly_rds_cost(engine: str, instance_class: str, region: str, license_model: str, multi_az: bool, hours: float) -> float:
     p = price_rds_ondemand(engine, instance_class, region, license_model=license_model, multi_az=multi_az)
     return round((p or 0.0) * hours, 2)
+
 
