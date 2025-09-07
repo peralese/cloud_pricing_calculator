@@ -18,6 +18,13 @@ from pricing import (
     monthly_network_cost, monthly_rds_cost,
 )
 
+from recommender import (
+    infer_profile,
+    fetch_instance_catalog, pick_instance, smallest_meeting_cpu, smallest_meeting_mem,
+    fetch_azure_vm_catalog, pick_azure_size,
+    normalize_azure_region,  # <-- add this
+)
+
 # ---------- Simple I/O helpers ----------
 def find_latest_output(patterns=("output/recommend_*.csv","output/recommend_*.xlsx")) -> Optional[Path]:
     from glob import glob

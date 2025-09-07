@@ -106,20 +106,96 @@ def _azure_list_vm_sizes_via_sdk(region: str):
 
 def _azure_list_vm_sizes_via_cli(region: str):
     import subprocess, json as _json, shutil, sys
+
     az = shutil.which("az") or shutil.which("az.cmd") or shutil.which("az.exe")
     if not az:
+        print("[azure-cli] 'az' not found on PATH from Python.", file=sys.stderr)
         return None
     try:
-        out = subprocess.check_output([az, "vm", "list-sizes", "--location", region, "-o", "json"], stderr=subprocess.STDOUT)
+        out = subprocess.check_output(
+            [az, "vm", "list-sizes", "--location", region, "-o", "json"],
+            stderr=subprocess.STDOUT,
+        )
         sizes = _json.loads(out.decode("utf-8"))
-        return [{"name": s["name"], "vcpu": int(s["numberOfCores"]), "memory_gib": float(s["memoryInMb"]) / 1024.0} for s in sizes]
+
+        def _mem_gib(entry):
+            # Azure CLI uses memoryInMB (uppercase MB); be tolerant of variants
+            mb = entry.get("memoryInMB")
+            if mb is None:
+                mb = entry.get("memoryInMb")
+            if mb is None:
+                raise KeyError("memoryInMB")
+            return float(mb) / 1024.0
+
+        result = []
+        for s in sizes:
+            try:
+                result.append({
+                    "name": s["name"],
+                    "vcpu": int(s["numberOfCores"]),
+                    "memory_gib": _mem_gib(s),
+                })
+            except Exception as e:
+                # Skip any malformed entries but keep going
+                print(f"[azure-cli] skipping size due to parse issue: {e}", file=sys.stderr)
+        return result
+
     except subprocess.CalledProcessError as e:
         msg = e.output.decode("utf-8", errors="ignore") if getattr(e, "output", None) else str(e)
-        print(f"Azure CLI call failed for region '{region}'. Ensure `az login` and subscription are set.\n{msg}", file=sys.stderr)
+        print(f"[azure-cli] call failed for region '{region}'. Ensure `az login` and subscription are set.\n{msg}",
+              file=sys.stderr)
         return None
-    except Exception:
+    except Exception as e:
+        print(f"[azure-cli] unexpected error: {e}", file=sys.stderr)
         return None
 
+# Optional: place this near other helpers if not present yet
+_AZ_REGION_NORMALIZE = {
+    "east us": "eastus", "eastus": "eastus",
+    "east us 2": "eastus2", "eastus2": "eastus2",
+    "west us": "westus", "westus": "westus",
+    "west us 2": "westus2", "westus2": "westus2",
+}
+def normalize_azure_region(s: str) -> str:
+    key = " ".join(str(s or "").lower().split())
+    return _AZ_REGION_NORMALIZE.get(key, key.replace(" ", ""))
+
+
+def fetch_azure_vm_catalog(region: str) -> Dict[str, dict]:
+    """
+    Prefer SDK, fall back to CLI, then cache. Emit diagnostics about which path worked.
+    Always refresh cache on success so future runs are instant.
+    """
+    reg = normalize_azure_region(region)
+    tried = []
+
+    sizes = _azure_list_vm_sizes_via_sdk(reg)
+    tried.append(f"SDK={'ok' if sizes else 'fail'}")
+
+    if not sizes:
+        sizes = _azure_list_vm_sizes_via_cli(reg)
+        tried.append(f"CLI={'ok' if sizes else 'fail'}")
+
+    if not sizes:
+        sizes = _azure_load_cached_sizes(reg)
+        tried.append(f"cache={'ok' if sizes else 'fail'}")
+
+    if not sizes:
+        raise SystemExit(
+            f"Azure VM sizes unavailable for region '{reg}'. Attempts: {', '.join(tried)}. "
+            "Install 'azure-identity azure-mgmt-compute' or Azure CLI and login, or provide a cached file under ./cache."
+        )
+
+    # refresh cache every successful fetch so future runs are fast/offline
+    try:
+        _azure_save_cached_sizes(reg, sizes)
+    except Exception:
+        pass
+
+    return {
+        s["name"]: {"instanceType": s["name"], "vcpu": s["vcpu"], "memory_gib": s["memory_gib"]}
+        for s in sizes
+    }
 
 def _azure_catalog_cache_path(region: str) -> Path:
     Path("cache").mkdir(exist_ok=True)

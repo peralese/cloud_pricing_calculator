@@ -1,193 +1,210 @@
 # Cloud Pricing Calculator
 
-A Python tool that recommends instance types and retrieves pricing for cloud workloads.  
-Currently supports **AWS EC2** recommendations and pricing end-to-end, with **Azure VM** support in progress.  
-Accepts **CSV** and **Excel** input, interactive prompts for missing parameters, and outputs results into a standardized `./output/` directory with timestamped filenames.
+A Python tool that **recommends instance/VM sizes** and **prices workloads** for a single cloud per run.
+
+- ✅ **AWS**: Recommend + live pricing (AWS Pricing API)
+- ✅ **Azure**: Recommend (SDK/CLI/cache) + **basic pricing** (heuristic with optional overrides)
+- 🔜 **Azure live pricing** via Retail Prices API (cached for speed)
+
+The app accepts **CSV/Excel** inputs, prompts for missing info, and writes timestamped results under `./output/`.
 
 ---
 
 ## Features
 
-- **Input formats**: Accepts `.csv` and `.xlsx`/`.xls`
-- **Interactive prompts**: If no `--in` file is passed, you are prompted for a path (and Excel sheet name if needed)
-- **Output management**: Results are written to `./output/` with timestamped filenames (e.g. `recommend_20250901-213045.csv`)
-- **AWS EC2 recommendations**: Matches requirements against current-generation, x86_64 instance families (`balanced`, `compute`, `memory`)
-- **Diagnostics**: Adds transparency columns (`overprov_vcpu`, `overprov_mem_gib`, `fit_reason`) to show why a type was chosen
-- **AWS Pricing**: Fetches On-Demand hourly rates from the AWS Pricing API
-- **Multi-dimension monthly costs**: Computes estimates for:
-  - Compute (instance hourly → monthly)
-  - OS & licensing (AWS license-included vs BYOL)
-  - Block storage (EBS gp3/io1, $/GB-month)
-  - Object storage (S3 Standard, $/GB-month)
-  - Networking (Low/Medium/High egress profiles)
-  - Database (RDS engines, instance size, Multi-AZ)
-- **Extensible**: Architecture split into `main.py`, `recommender.py`, and `pricing.py` for easier extension
-- **Azure support**: VM recommendations and pricing coming soon
+- **Single-cloud runs (enforced)**: Every command requires `--cloud {aws|azure}`. The output carries that cloud forward to pricing.
+- **Input formats**: `.csv`, `.xlsx`/`.xls` (sheet prompt if omitted).
+- **Output management**: Timestamped files (e.g., `recommend_20250901-213045.csv`, `price_20250901-213142.csv`).
+- **Sizing/recommendations**
+  - **AWS EC2**: Current-gen x86_64 catalog; profile-aware (`balanced`, `compute`, `memory`); overprovision guardrails + `fit_reason`.
+  - **Azure VM**: Live sizes via **Azure SDK** or **Azure CLI**, with **local cache** fallback.
+- **Pricing**
+  - **AWS**: On-Demand hourly via **AWS Pricing API**, plus monthly breakdowns (compute, EBS, S3, network, RDS).
+  - **Azure**: **Basic model** (base + OS uplift) or **per-SKU overrides** via `prices/azure_compute_prices.json`.
+- **Monthly cost breakdown**: `monthly_compute_usd`, `monthly_ebs_usd`, `monthly_s3_usd`, `monthly_network_usd`, `monthly_db_usd`, `monthly_total_usd`.
 
 ---
 
-## Usage
-
-### Install dependencies
+## Installation
 
 ```bash
-pip install boto3 pandas openpyxl python-dotenv
-
+# Inside your project venv
+pip install boto3 pandas openpyxl
+# (optional, enables Azure SDK path)
+pip install azure-identity azure-mgmt-compute
 ```
 
-### Recommend instances
-
-```bash
-python main.py recommend --cloud aws --region us-east-1 --in apps.csv
-```
-
-Or with Excel:
-
-```bash
-python main.py recommend --cloud aws --region us-east-1 --in apps.xlsx --sheet Sheet1
-```
-
-If you omit `--in`, you will be prompted interactively.
-
-### Price recommendations (AWS)
-
-```bash
-# Auto-picks latest recommend_*.csv if --in omitted
-python main.py price --cloud aws --region us-east-1
-
-# Strict: fail if no recommendation file found
-python main.py price --cloud aws --region us-east-1 --latest
-
-# Explicit file
-python main.py price --cloud aws --region us-east-1 --in ./output/recommend_20250830-213045.csv
-
-```
-
-```bash
-# Explicit file
-python auto_instance_recommender.py price --region us-east-1 --in ./output/recommend_20250830-213045.csv
-```
-
-#### Pricing options
-- `--hours-per-month <float>` : Hours used to compute monthly cost (default: 730)  
-- `--no-monthly` : Skip monthly cost column  
-- `--latest` : Force using newest `output/recommend_*.csv` and fail if none found  
+> Windows/VS Code tip: Use the VS Code integrated terminal and activate the venv:
+> `.\.venv\Scripts\Activate.ps1`
 
 ---
+
+## Quick Start — AWS
+
+**Recommend**
+```bash
+python main.py recommend --cloud aws --region us-east-1 --in servers.csv
+```
+
+**Price**
+```bash
+python main.py price --cloud aws --latest --hours-per-month 730
+```
+
+Notes:
+- `--latest` picks the newest `recommend_*.csv` automatically.
+- You can pass `--in <path>` instead of `--latest`.
+
+---
+
+## Quick Start — Azure
+
+You can use **SDK** or **CLI** (or a local **cache**) for sizing.
+
+### Option A — Azure CLI (fastest)
+```bash
+az login
+az account set --subscription "<SubscriptionId or Name>"
+python main.py recommend --cloud azure --region eastus --in servers.csv
+```
+
+### Option B — Azure SDK
+```bash
+pip install azure-identity azure-mgmt-compute
+$env:AZURE_SUBSCRIPTION_ID="<SubscriptionId GUID>"
+python main.py recommend --cloud azure --region eastus --in servers.csv
+```
+
+### Option C — Offline cache (no login)
+Create `./cache/azure_vm_sizes_eastus.json` with entries like:
+```json
+[
+  {"name":"Standard_D2s_v5","vcpu":2,"memory_gib":8},
+  {"name":"Standard_D4s_v5","vcpu":4,"memory_gib":16}
+]
+```
+Then:
+```bash
+python main.py recommend --cloud azure --region eastus --in servers.csv
+```
+
+**Price (Azure)**
+```bash
+python main.py price --cloud azure --latest --hours-per-month 730
+```
+
+> ℹ️ Azure pricing currently uses a **basic model** (base hourly + OS uplift).  
+> To pin specific SKUs/regions to real numbers, add `prices/azure_compute_prices.json`:
+> ```json
+> [{"region":"eastus","sku":"Standard_D4s_v5","os":"linux","license_model":"BYOL","hourly":0.218}]
+> ```
+
+---
+
+## CLI & Behavior
+
+- `--cloud {aws|azure}` is **required** on both `recommend` and `price`.
+- The recommender **stamps** the selected cloud onto every output row.
+- The pricer **verifies** the file matches the CLI cloud (older files without a `cloud` column inherit the CLI flag).
+
+Common flags:
+- `--in <file>`: input CSV/Excel
+- `--sheet <name>`: Excel sheet (omit to be prompted)
+- `--latest`: use newest `./output/recommend_*.csv` (pricing)
+- `--hours-per-month <float>`: default 730
+- `--no-monthly`: skip monthly columns
 
 ---
 
 ## Input Schema
 
-The input CSV/Excel must contain at least:
+**Required**:
+- `id` — row identifier
+- `vcpu`
+- `memory_gib`
+- `profile` — `balanced` | `compute` | `memory` (can be inferred)
 
-- `id` – application/server identifier  
-- `vcpu` – number of vCPUs  
-- `memory_gib` – memory in GiB  
-- `profile` – workload profile (`balanced`, `compute`, `memory`)  
-
-Optional expanded fields for pricing:
-
-- `os` – `Linux`, `Windows`, `RHEL`, `SUSE`  
-- `license_model` – `AWS` (license-included) or `BYOL`  
-- `ebs_gb` – total EBS GB (across volumes of same type)  
-- `ebs_type` – `gp3`, `io1`, `st1`  
-- `ebs_iops` – provisioned IOPS (gp3/io1, optional)  
-- `s3_gb` – object storage GB (S3 Standard)  
-- `network_profile` – `Low`, `Medium`, `High` (maps to assumed egress GB/month)  
-- `db_engine` – `Postgres`, `MySQL`, `SQLServer`, etc.  
-- `db_instance_class` – RDS instance class (e.g., `db.m5.large`)  
-- `db_storage_gb` – DB storage GB  
-- `multi_az` – `Yes`/`No`  
+**Optional (pricing)**:
+- `os` — `Linux` | `Windows` | `RHEL` | `SUSE`
+- `license_model` — `AWS` (license-included) | `BYOL`
+- `ebs_gb`, `ebs_type` — `gp3` | `io1`
+- `s3_gb`
+- `network_profile` — `Low` | `Medium` | `High`
+- `db_engine`, `db_instance_class`, `multi_az`
+- `region` — e.g., `us-east-1` (AWS) or `eastus` (Azure)
 
 ---
+
 ## Output
 
-- **Recommendations**: `./output/recommend_<timestamp>.csv`  
-  Includes requested resources, chosen instance, overprovision metrics, fit reason, plus all carried-through input columns.
+**Recommendations** (`./output/recommend_<timestamp>.csv`)
+- `cloud`, `region`
+- `recommended_instance_type` (AWS) / `instanceType` (Azure output column unified as `recommended_instance_type`)
+- Diagnostics: `overprov_vcpu`, `overprov_mem_gib`, `fit_reason`, `note`
 
-- **Pricing**: `./output/price_<timestamp>.csv`  
-  Extends recommendations with cost breakdown:  
-  - `price_per_hour_usd`  
-  - `monthly_compute_usd`  
-  - `monthly_ebs_usd`  
-  - `monthly_s3_usd`  
-  - `monthly_network_usd`  
-  - `monthly_db_usd`  
-  - `monthly_total_usd`  
-  - `pricing_note`  
+**Pricing** (`./output/price_<timestamp>.csv`)
+- `price_per_hour_usd`
+- Monthly breakdown: `monthly_compute_usd`, `monthly_ebs_usd`, `monthly_s3_usd`,
+  `monthly_network_usd`, `monthly_db_usd`, `monthly_total_usd`
+- `pricing_note` (if any filters/inputs prevented live pricing)
+
+---
+
+## Region tips
+
+**AWS → Azure** rough equivalents:
+
+| AWS            | Azure     |
+|----------------|-----------|
+| `us-east-1`    | `eastus`  |
+| `us-east-2`    | `eastus2` |
+| `us-west-1`    | `westus`  |
+| `us-west-2`    | `westus2` |
+
+Azure short codes are lowercase with no spaces (e.g., `eastus`).  
+The tool normalizes common variants like “East US” → `eastus`.
+
+---
+
+## Troubleshooting
+
+- **Azure: “VM sizes unavailable”**  
+  - Ensure `az account show` works in the same terminal.
+  - Try `az vm list-sizes --location eastus -o table`.
+  - If running via SDK, set: `$env:AZURE_SUBSCRIPTION_ID="<GUID>"`.
+  - As a fallback, add `cache/azure_vm_sizes_eastus.json` (see Quick Start — Azure).
+
+- **AWS region required**  
+  Pass `--region us-east-1` or set `AWS_REGION`.
+
+- **Excel read errors**  
+  `pip install pandas openpyxl`, ensure the sheet name is correct or omit `--sheet` to be prompted.
 
 ---
 
 ## Roadmap
 
-
-- [x] **Guardrails**  
-  Flag extreme overprovisioning (e.g., >4× requested resources) and provide fit transparency (`cpu-bound`, `memory-bound`, `exact`).
-
-- [x] **Pricing input defaults**  
-  `price` automatically looks in the `./output` folder for the most recent recommendation file if no `--in` is provided.  
-  `--latest` flag enforces strict newest-file mode.
-
-- [x] **Server metadata awareness**  
-  Supports OS awareness (`Linux`, `Windows`, `RHEL`, `SUSE`) and BYOL licensing model.
-
-- [x] **Additional cost dimensions**  
-  Block storage, object storage, networking, and database costs now included.
-
-- [x] **Monthly cost output**  
-  Pricing step computes **monthly cost** per server (default 730 hours).  
-  User can configure hours or disable monthly columns.
-
-- [ ] **Azure support (coming soon)**  
-  Add VM sizing and pricing for Microsoft Azure.
-
-- [ ] **Enhanced Excel integration**  
-  Auto-detect multiple sheets and process them in batch.  
-  Retain formatting when writing results back to Excel.
-
-- [ ] **Visualization & reporting**  
-  Generate charts (CPU vs memory vs price scatterplots).  
-  Summarize costs by region, profile type, or OS.  
-  Build cost breakdown dashboards.
-
-- [ ] **Automation hooks**  
-  Add option to push outputs to **S3** or **Google Sheets**.  
-  Enable integration with migration tracking tools (e.g., ServiceNow, CMDB).
- 
----
-
-## Example Workflow
-
-1. Prepare an input CSV:
-
-```csv
-id,vcpu,memory_gib,profile,os,license_model,ebs_gb,ebs_type,s3_gb,network_profile,db_engine,db_instance_class,db_storage_gb,multi_az
-app-001,4,16,balanced,Windows,AWS,350,gp3,100,Medium,Postgres,db.m5.large,100,Yes
-app-002,2,8,,RHEL,BYOL,50,gp3,0,Low,,,,No
-
-```
-
-2. Run recommender:
-
-```bash
-python main.py recommend --cloud aws --region us-east-1 --in servers.csv
-
-```
-
-3. Run pricer:
-
-```bash
-python main.py price --cloud aws --region us-east-1 --latest
-```
-
-## 📌 License
-
-MIT License. Use freely, modify, and share.
+- [x] Guardrails: overprovision flags + `fit_reason`
+- [x] Pricing defaults: `--latest`, sane fallbacks
+- [x] Server metadata: OS + BYOL
+- [x] Cost dimensions: EBS, S3, network, RDS
+- [x] Monthly output: full breakdown
+- [x] **Azure sizing**: CLI/SDK with cache
+- [x] **Azure basic pricing**: base + OS uplift; JSON overrides
+- [ ] **Azure live pricing**: Retail Prices API + local cache
+- [ ] Enhanced Excel integration (multi-sheet, formatting)
+- [ ] Visualization & reporting (charts/dashboards)
+- [ ] Automation hooks (S3 / Google Sheets, CMDB)
 
 ---
 
-## 👨‍💻 Author
+## License
+
+MIT License
+
+---
+
+## Author
 
 **Erick Perales**  
 IT Architect | Cloud Migration Specialist  
