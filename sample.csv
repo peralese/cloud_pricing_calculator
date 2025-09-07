@@ -1,4 +1,3 @@
-id,vcpu,memory_gib,profile,os,license_model,ebs_gb,ebs_type,s3_gb,network_profile,db_engine,db_instance_class,multi_az
-web-01,2,8,balanced,Linux,AWS,100,gp3,50,low,PostgreSQL,db.m5.large,false
-etl-01,8,32,memory,Linux,BYOL,500,io1,200,medium,MySQL,db.m5.xlarge,true
-api-01,4,8,compute,Windows,AWS,150,gp3,10,low,,,
+id,vcpu,memory_gib,profile,os,license_model,ebs_gb,ebs_type,s3_gb,network_profile,db_engine,db_instance_class,multi_az,region
+web-01,2,8,balanced,Linux,AWS,100,gp3,50,low,PostgreSQL,db.m5.large,false,us-east-1
+etl-01,8,32,memory,Linux,BYOL,500,io1,200,medium,MySQL,db.m5.xlarge,true,us-east-1

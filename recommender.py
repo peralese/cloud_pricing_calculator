@@ -10,6 +10,18 @@ FAMILY_PREFS = {
     "memory":   ["r7i", "r6i", "r5"],
 }
 
+_AZ_REGION_NORMALIZE = {
+    "east us": "eastus", "eastus": "eastus",
+    "east us 2": "eastus2", "eastus2": "eastus2",
+    "west us": "westus", "westus": "westus",
+    "west us 2": "westus2", "westus2": "westus2",
+}
+
+def normalize_azure_region(s: str) -> str:
+    key = " ".join(str(s or "").lower().split())
+    return _AZ_REGION_NORMALIZE.get(key, key.replace(" ", ""))
+
+
 def infer_profile(vcpu: int, mem_gib: float) -> str:
     if vcpu <= 0 or mem_gib <= 0:
         return "balanced"
@@ -93,13 +105,21 @@ def _azure_list_vm_sizes_via_sdk(region: str):
         return None
 
 def _azure_list_vm_sizes_via_cli(region: str):
-    import subprocess, json as _json
+    import subprocess, json as _json, shutil, sys
+    az = shutil.which("az") or shutil.which("az.cmd") or shutil.which("az.exe")
+    if not az:
+        return None
     try:
-        out = subprocess.check_output(["az","vm","list-sizes","--location",region,"-o","json"], stderr=subprocess.STDOUT)
+        out = subprocess.check_output([az, "vm", "list-sizes", "--location", region, "-o", "json"], stderr=subprocess.STDOUT)
         sizes = _json.loads(out.decode("utf-8"))
-        return [{"name": s["name"], "vcpu": int(s["numberOfCores"]), "memory_gib": float(s["memoryInMb"])/1024.0} for s in sizes]
+        return [{"name": s["name"], "vcpu": int(s["numberOfCores"]), "memory_gib": float(s["memoryInMb"]) / 1024.0} for s in sizes]
+    except subprocess.CalledProcessError as e:
+        msg = e.output.decode("utf-8", errors="ignore") if getattr(e, "output", None) else str(e)
+        print(f"Azure CLI call failed for region '{region}'. Ensure `az login` and subscription are set.\n{msg}", file=sys.stderr)
+        return None
     except Exception:
         return None
+
 
 def _azure_catalog_cache_path(region: str) -> Path:
     Path("cache").mkdir(exist_ok=True)

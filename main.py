@@ -89,7 +89,8 @@ def cloud_for_row(row: dict, default_cloud: str) -> str:
 
 # ---------- Commands ----------
 def cmd_recommend(args):
-    default_cloud = cloud_from_str(getattr(args, "cloud", "aws"))
+    # default_cloud = cloud_from_str(getattr(args, "cloud", "aws"))
+    default_cloud = cloud_from_str(args.cloud)
 
     # Region handling (AWS only; Azure will use eastus if row has no region)
     region_aws = args.region or os.getenv("AWS_REGION")
@@ -129,11 +130,13 @@ def cmd_recommend(args):
         if prof not in ("balanced","compute","memory"):
             prof = infer_profile(vcpu, mem_gib)
 
-        row_cloud = cloud_for_row(r, default_cloud)
+        # row_cloud = cloud_for_row(r, default_cloud)
+        row_cloud = default_cloud  # enforce single-cloud run; ignore any input 'cloud' column
 
         # Select region per cloud
         if row_cloud == "azure":
-            az_region = (r.get("region") or "eastus").strip().lower()
+            from recommender import normalize_azure_region  # add at top with other imports
+            az_region = normalize_azure_region(r.get("region") or "eastus")
             if az_region not in azure_catalog_by_region:
                 azure_catalog_by_region[az_region] = fetch_azure_vm_catalog(az_region)
             chosen = pick_azure_size(azure_catalog_by_region[az_region], vcpu, mem_gib)
@@ -164,7 +167,8 @@ def cmd_recommend(args):
         base = dict(r)
         base.update({
             "id": rid,
-            "cloud": row_cloud,
+            # "cloud": row_cloud,
+            "cloud": row_cloud,  # stamped from CLI, not from input
             "requested_vcpu": vcpu,
             "requested_memory_gib": mem_gib,
             "profile": prof,
@@ -192,7 +196,7 @@ def cmd_recommend(args):
     print(f"Wrote recommendations → {out_path}")
 
 def cmd_price(args):
-    default_cloud = cloud_from_str(getattr(args, "cloud", "aws"))
+    expected_cloud = cloud_from_str(args.cloud)
 
     # Choose input file (respect --latest)
     if getattr(args, "latest", False):
@@ -216,18 +220,33 @@ def cmd_price(args):
     else:
         args.sheet = maybe_prompt_for_sheet(Path(args.input), args.sheet)
 
+    # ---- READ ROWS FIRST ----
     rows = read_rows(args.input, sheet=args.sheet)
     if not rows:
         raise SystemExit("❌ Input file has no rows.")
 
+    # ---- VALIDATE SINGLE-CLOUD FILE (must match CLI) ----
+    seen = {(str(r.get("cloud", "")).strip().lower() or "") for r in rows}
+    seen.discard("")  # allow older files with no 'cloud'; they'll inherit CLI cloud
+    if seen:
+        if len(seen) > 1 or next(iter(seen)) != expected_cloud:
+            human = ", ".join(sorted(seen))
+            raise SystemExit(
+                f"❌ This price run is for '--cloud {expected_cloud}', but the file contains cloud={human}. "
+                "Please price with the matching --cloud or re-run 'recommend' for a single cloud."
+            )
+
     out_rows = []
     for r in rows:
-        row_cloud = cloud_for_row(r, default_cloud)
+        # enforce CLI cloud for this run
+        row_cloud = expected_cloud
+        r["cloud"] = expected_cloud  # ensure output is explicit
+
         itype = r.get("recommended_instance_type") or r.get("instance_type") or ""
         # Region default per cloud
-        region_row = (r.get("region") or args.region or ("eastus" if row_cloud=="azure" else None))
+        region_row = (r.get("region") or args.region or ("eastus" if row_cloud == "azure" else None))
         os_row = (r.get("os") or args.os or "Linux").strip()
-        license_model = (r.get("license_model") or ("AWS" if row_cloud=="aws" else "BYOL")).strip()
+        license_model = (r.get("license_model") or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
 
         ebs_gb = as_float(r.get("ebs_gb"), 0.0)
         ebs_type = (r.get("ebs_type") or "gp3").strip()
@@ -247,10 +266,10 @@ def cmd_price(args):
             if row_cloud == "azure":
                 from pricing import azure_vm_price_hourly
                 compute_price = azure_vm_price_hourly(region_row, itype, os_for_compute, license_model)
-                r["pricing_note"] = r.get("pricing_note","")
+                r["pricing_note"] = r.get("pricing_note", "")
             else:
                 compute_price = price_ec2_ondemand(itype, region_row, os_name=os_for_compute)
-                r["pricing_note"] = r.get("pricing_note","") if compute_price is not None else "No EC2 price found (check filters/region/OS)"
+                r["pricing_note"] = r.get("pricing_note", "") if compute_price is not None else "No EC2 price found (check filters/region/OS)"
 
         # Monthly math
         hours = float(args.hours_per_month)
@@ -270,17 +289,25 @@ def cmd_price(args):
             else:
                 db_monthly = 0.0
             r["monthly_db_usd"] = f"{db_monthly:.2f}"
-            parts = [as_float(r["monthly_compute_usd"]), as_float(r["monthly_ebs_usd"]),
-                     as_float(r["monthly_s3_usd"]), as_float(r["monthly_network_usd"]), as_float(r["monthly_db_usd"])]
+            parts = [
+                as_float(r["monthly_compute_usd"]),
+                as_float(r["monthly_ebs_usd"]),
+                as_float(r["monthly_s3_usd"]),
+                as_float(r["monthly_network_usd"]),
+                as_float(r["monthly_db_usd"]),
+            ]
             r["monthly_total_usd"] = f"{sum(parts):.2f}"
 
         r["provider"] = row_cloud
         out_rows.append(r)
 
     fieldnames = list(out_rows[0].keys())
-    for col in ["provider","price_per_hour_usd","monthly_compute_usd","monthly_ebs_usd",
-                "monthly_s3_usd","monthly_network_usd","monthly_db_usd","monthly_total_usd","pricing_note"]:
-        if col not in fieldnames: fieldnames.append(col)
+    for col in [
+        "provider","price_per_hour_usd","monthly_compute_usd","monthly_ebs_usd",
+        "monthly_s3_usd","monthly_network_usd","monthly_db_usd","monthly_total_usd","pricing_note"
+    ]:
+        if col not in fieldnames:
+            fieldnames.append(col)
 
     out_path = make_output_path("price", args.output)
     print(f"Input:  {args.input}")
@@ -293,7 +320,7 @@ def parse_args():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p1 = sub.add_parser("recommend", help="Recommend instance/VM sizes")
-    p1.add_argument("--cloud", choices=["aws","azure"], default="aws")
+    p1.add_argument("--cloud", choices=["aws","azure"], required=True)
     p1.add_argument("--region", required=False, help="AWS region (for AWS rows), e.g., us-east-1")
     p1.add_argument("--in", dest="input", required=False)
     p1.add_argument("--sheet", required=False)
@@ -301,7 +328,7 @@ def parse_args():
     p1.set_defaults(func=cmd_recommend)
 
     p2 = sub.add_parser("price", help="Add pricing to a recommendation CSV/Excel")
-    p2.add_argument("--cloud", choices=["aws","azure"], default="aws")
+    p2.add_argument("--cloud", choices=["aws","azure"], required=True)
     p2.add_argument("--region", help="Default AWS region (if not present per-row)")
     p2.add_argument("--os", choices=["Linux","Windows","RHEL","SUSE"], default="Linux")
     p2.add_argument("--in", dest="input", required=False)
