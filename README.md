@@ -20,7 +20,7 @@ The app accepts **CSV/Excel** inputs, prompts for missing info, and writes times
   - **Azure VM**: Live sizes via **Azure SDK** or **Azure CLI**, with **local cache** fallback.
 - **Pricing**
   - **AWS**: On-Demand hourly via **AWS Pricing API**, plus monthly breakdowns (compute, EBS, S3, network, RDS).
-  - **Azure**: **Basic model** (base + OS uplift) or **per-SKU overrides** via `prices/azure_compute_prices.json`.
+  - **Azure**: **Basic model** (base + OS uplift), **per-SKU overrides** via `prices/azure_compute_prices.json`, or **live pricing** from the Retail Prices API with cache.
 - **Monthly cost breakdown**: `monthly_compute_usd`, `monthly_ebs_usd`, `monthly_s3_usd`, `monthly_network_usd`, `monthly_db_usd`, `monthly_total_usd`.
 
 ---
@@ -29,7 +29,7 @@ The app accepts **CSV/Excel** inputs, prompts for missing info, and writes times
 
 ```bash
 # Inside your project venv
-pip install boto3 pandas openpyxl
+pip install boto3 pandas openpyxl requests
 # (optional, enables Azure SDK path)
 pip install azure-identity azure-mgmt-compute
 ```
@@ -90,14 +90,17 @@ python main.py recommend --cloud azure --region eastus --in servers.csv
 
 **Price (Azure)**
 ```bash
-python main.py price --cloud azure --latest --hours-per-month 730
+python main.py price --cloud azure --latest --hours-per-month 730 --refresh-azure-prices
 ```
 
-> ℹ️ Azure pricing currently uses a **basic model** (base hourly + OS uplift).  
-> To pin specific SKUs/regions to real numbers, add `prices/azure_compute_prices.json`:
-> ```json
-> [{"region":"eastus","sku":"Standard_D4s_v5","os":"linux","license_model":"BYOL","hourly":0.218}]
-> ```
+> ℹ️ Azure pricing uses precedence:  
+> 1. **Per-SKU overrides** (`prices/azure_compute_prices.json`)  
+> 2. **Live API cache** (Retail Prices API, refreshed with `--refresh-azure-prices`)  
+> 3. **Fallback heuristic** (base hourly + OS uplift)  
+
+⚠️ **Azure requires Azure region codes** (e.g., `eastus`, `eastus2`, `westus2`).  
+Do **not** use AWS-style regions (`us-east-1`, `us-west-2`).  
+The CLI `--region` takes precedence for Azure runs; invalid region codes will fail fast with a clear error.
 
 ---
 
@@ -113,6 +116,7 @@ Common flags:
 - `--latest`: use newest `./output/recommend_*.csv` (pricing)
 - `--hours-per-month <float>`: default 730
 - `--no-monthly`: skip monthly columns
+- `--refresh-azure-prices`: refresh Azure Retail Prices API cache before pricing
 
 ---
 
@@ -131,7 +135,10 @@ Common flags:
 - `s3_gb`
 - `network_profile` — `Low` | `Medium` | `High`
 - `db_engine`, `db_instance_class`, `multi_az`
-- `region` — e.g., `us-east-1` (AWS) or `eastus` (Azure)
+- `region`
+  - **AWS**: `us-east-1`, `us-west-2`, etc.  
+  - **Azure**: `eastus`, `eastus2`, `westus2` (short codes, lowercase, no spaces).  
+    > CLI `--region` overrides file entries for Azure runs.
 
 ---
 
@@ -139,7 +146,7 @@ Common flags:
 
 **Recommendations** (`./output/recommend_<timestamp>.csv`)
 - `cloud`, `region`
-- `recommended_instance_type` (AWS) / `instanceType` (Azure output column unified as `recommended_instance_type`)
+- `recommended_instance_type` (AWS) / `instanceType` (Azure output unified as `recommended_instance_type`)
 - Diagnostics: `overprov_vcpu`, `overprov_mem_gib`, `fit_reason`, `note`
 
 **Pricing** (`./output/price_<timestamp>.csv`)
@@ -174,6 +181,10 @@ The tool normalizes common variants like “East US” → `eastus`.
   - If running via SDK, set: `$env:AZURE_SUBSCRIPTION_ID="<GUID>"`.
   - As a fallback, add `cache/azure_vm_sizes_eastus.json` (see Quick Start — Azure).
 
+- **Azure: “No registered resource provider found for location 'us-east-1'”**  
+  - This happens if you accidentally passed an AWS region name (`us-east-1`) in Azure mode.
+  - Fix: use Azure region codes (`eastus`, `eastus2`, etc.).
+
 - **AWS region required**  
   Pass `--region us-east-1` or set `AWS_REGION`.
 
@@ -191,7 +202,7 @@ The tool normalizes common variants like “East US” → `eastus`.
 - [x] Monthly output: full breakdown
 - [x] **Azure sizing**: CLI/SDK with cache
 - [x] **Azure basic pricing**: base + OS uplift; JSON overrides
-- [ ] **Azure live pricing**: Retail Prices API + local cache
+- [x] **Azure live pricing**: Retail Prices API + local cache
 - [ ] Enhanced Excel integration (multi-sheet, formatting)
 - [ ] Visualization & reporting (charts/dashboards)
 - [ ] Automation hooks (S3 / Google Sheets, CMDB)
@@ -209,3 +220,4 @@ MIT License
 **Erick Perales**  
 IT Architect | Cloud Migration Specialist  
 https://github.com/peralese
+

@@ -272,7 +272,7 @@ def cmd_price(args):
         else:
             if row_cloud == "azure":
                 from pricing import azure_vm_price_hourly
-                compute_price = azure_vm_price_hourly(region_row, itype, os_for_compute, license_model)
+                compute_price = azure_vm_price_hourly(region_row, itype, os_for_compute, license_model, refresh=getattr(args, "refresh_azure_prices", False))
                 r["pricing_note"] = r.get("pricing_note", "")
             else:
                 compute_price = price_ec2_ondemand(itype, region_row, os_name=os_for_compute)
@@ -344,6 +344,7 @@ def parse_args():
     p2.add_argument("--latest", action="store_true")
     p2.add_argument("--hours-per-month", type=float, default=730.0)
     p2.add_argument("--no-monthly", action="store_true")
+    p2.add_argument("--refresh-azure-prices", action="store_true", help="Refresh Azure Retail Prices cache for compute before pricing")
     p2.set_defaults(func=cmd_price)
     return p.parse_args()
 

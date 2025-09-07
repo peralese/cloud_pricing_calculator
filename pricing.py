@@ -2,6 +2,8 @@
 import csv, sys, json, os
 from pathlib import Path
 from typing import Optional, List
+import time, requests
+from typing import Dict, Tuple
 
 # ---------- Cost model defaults ----------
 S3_STD_GB_MONTH = float(os.getenv("S3_STD_GB_MONTH", "0.023"))
@@ -131,6 +133,136 @@ def price_rds_ondemand(engine: str, instance_class: str, region: str, license_mo
 # ---------- Azure pricing ----------
 # Optional override file: ./prices/azure_compute_prices.json
 # [{"region":"eastus","sku":"Standard_D4s_v5","os":"linux","license_model":"BYOL","hourly":0.20}, ...]
+# ----- Azure Retail Prices API (live) with local cache -----
+def _azure_cache_path(region: str) -> Path:
+    Path("prices").mkdir(exist_ok=True, parents=True)
+    return Path(f"prices/azure_compute_cache_{region}.json")
+
+def _normalize_azure_sku(sku: str) -> str:
+    # "Standard_D4s_v5" -> "D4s v5"; "Standard_F8s_v2" -> "F8s v2"
+    s = str(sku or "")
+    if s.startswith("Standard_"):
+        s = s[len("Standard_"):]
+    return s.replace("_", " ")
+
+def _azure_cache_load(region: str) -> Dict[str, dict]:
+    p = _azure_cache_path(region)
+    if p.exists():
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _azure_cache_save(region: str, data: Dict[str, dict]) -> None:
+    try:
+        with open(_azure_cache_path(region), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def _azure_price_key(sku_core: str, os_name: str) -> str:
+    # cache key, e.g., "D4s v5|linux"
+    return f"{sku_core.strip()}|{os_name.strip().lower()}"
+
+def _azure_fetch_retail_prices(region: str, sku_core: str, os_name: str, timeout_s: float = 15.0) -> Optional[float]:
+    """
+    Call Azure Retail Prices API to get On-Demand hourly price for a VM SKU in a given region.
+    We prioritize:
+      - serviceName: 'Virtual Machines'
+      - armRegionName: exact region (e.g., 'eastus')
+      - skuName: exact sku_core (e.g., 'D4s v5')
+      - priceType: 'Consumption'
+      - unitOfMeasure: '1 Hour'
+      - NOT spot/low priority, NOT reservation
+      - OS:
+          Linux  -> prefer entries that are Linux or not explicitly Windows
+          Windows-> prefer entries marked Windows
+    Returns USD hourly price or None.
+    """
+    # Base endpoint
+    base = "https://prices.azure.com/api/retail/prices"
+
+    # Filters: priceType Consumption, armRegionName, skuName, serviceName Virtual Machines
+    # API filter syntax uses OData; escape single quotes
+    arm = region.replace("'", "''")
+    sku = sku_core.replace("'", "''")
+    filt = (
+        f"serviceName eq 'Virtual Machines' and "
+        f"armRegionName eq '{arm}' and "
+        f"skuName eq '{sku}' and "
+        f"priceType eq 'Consumption'"
+    )
+
+    url = f"{base}?$filter={requests.utils.quote(filt, safe=' =\'')}"
+    # pagination
+    best_linux = None
+    best_windows = None
+
+    while url:
+        resp = requests.get(url, timeout=timeout_s)
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        items = data.get("Items", []) or data.get("items", [])
+        for it in items:
+            # Exclude reservation/spot
+            if str(it.get("type","")).lower() != "consumption":
+                continue
+            if "spot" in str(it.get("meterName","")).lower() or "low priority" in str(it.get("meterName","")).lower():
+                continue
+            if it.get("unitOfMeasure") not in ("1 Hour", "Hour"):
+                continue
+            price = it.get("retailPrice")
+            currency = it.get("currencyCode", "USD")
+            if price is None or currency != "USD":
+                continue
+
+            pname = str(it.get("productName","")).lower()
+            mname = str(it.get("meterName","")).lower()
+            # crude OS detection
+            is_windows = ("windows" in pname) or ("windows" in mname)
+            is_linux = ("linux" in pname) or ("linux" in mname) or (not is_windows)
+
+            if is_windows:
+                best_windows = float(price) if best_windows is None else min(best_windows, float(price))
+            elif is_linux:
+                best_linux = float(price) if best_linux is None else min(best_linux, float(price))
+
+        url = data.get("NextPageLink") or data.get("nextPageLink")
+
+    if os_name.strip().lower() == "windows":
+        return best_windows if best_windows is not None else best_linux
+    else:
+        return best_linux if best_linux is not None else best_windows
+
+def _azure_live_compute_hourly(region: str, sku: str, os_name: str, refresh: bool = False) -> Optional[float]:
+    """
+    Load cached price or fetch from API and update cache.
+    Cache schema: { "<sku_core>|<os>": { "price": float, "ts": epoch_seconds } }
+    """
+    region = region.strip().lower()
+    sku_core = _normalize_azure_sku(sku)
+    key = _azure_price_key(sku_core, os_name)
+
+    cache = {} if refresh else _azure_cache_load(region)
+    hit = cache.get(key)
+    if hit and not refresh:
+        val = hit.get("price")
+        if isinstance(val, (int, float)):
+            return float(val)
+
+    # fetch live
+    price = _azure_fetch_retail_prices(region, sku_core, os_name)
+    if price is None:
+        return None
+    cache[key] = {"price": float(price), "ts": int(time.time())}
+    _azure_cache_save(region, cache)
+    return float(price)
+
+
+
 def _azure_price_override(region: str, sku: str, os_name: str, license_model: str) -> Optional[float]:
     p = Path("prices/azure_compute_prices.json")
     if not p.exists(): return None
@@ -154,14 +286,23 @@ _AZ_OS_UPLIFT = {
     "suse": 0.07,
 }
 
-def azure_vm_price_hourly(region: str, sku: str, os_name: str, license_model: str) -> float:
+def azure_vm_price_hourly(region: str, sku: str, os_name: str, license_model: str, refresh=False) -> float:
+    # 0) Live API + cache
+    live = _azure_live_compute_hourly(region, sku, os_name, refresh=refresh)
+    if live is not None:
+        return live
+
+    # 1) User override JSON
     o = _azure_price_override(region, sku, os_name, license_model)
     if o is not None:
         return o
+
+    # 2) Heuristic fallback (base + OS uplift)
     uplift = _AZ_OS_UPLIFT.get(os_name.strip().lower(), 0.0)
     if str(license_model).strip().lower() != "byol":
         uplift += 0.01
     return _AZ_BASE_DEFAULT_HOURLY + uplift
+
 
 # ---------- Monthly calculators ----------
 def monthly_compute_cost(price_per_hour: Optional[float], hours: float) -> float:
