@@ -1,6 +1,7 @@
 # main.py
 import os
 import sys
+import re
 import time
 import datetime
 from pathlib import Path
@@ -8,6 +9,9 @@ from typing import Optional, List, Dict
 
 import click
 import pandas as pd
+from pathlib import Path
+from typing import Optional, List
+from glob import glob
 
 from validator import validate_dataframe, write_validator_report
 from validator import AWS_REGIONS, AZURE_REGIONS
@@ -37,6 +41,74 @@ try:
 except Exception:  # pragma: no cover
     azure_vm_price_hourly = None
 
+#  -------- Output helpers (date/timestamped folders) --------
+def _now_date_time():
+    import datetime as _dt
+    d = _dt.datetime.now()
+    return d.strftime("%Y-%m-%d"), d.strftime("%H%M%S")
+
+def _ensure_dir(p: Path) -> Path:
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _derive_run_dir_from_recommend(rec_path: Path) -> Path | None:
+    """
+    If the recommend file already lives in output/YYYY-MM-DD/HHMMSS/,
+    reuse that directory. Otherwise return None.
+    """
+    try:
+        parent = rec_path.resolve().parent
+        date_dir = parent.parent.name
+        time_dir = parent.name
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_dir) and re.fullmatch(r"\d{6}", time_dir):
+            return parent
+    except Exception:
+        pass
+    return None
+
+def _new_run_dir(base: Path = Path("output")) -> Path:
+    date_str, time_str = _now_date_time()
+    return _ensure_dir(base / date_str / time_str)
+
+def _default_paths_for_recommend(user_out: str | None, user_report: str | None):
+    """
+    Decide file paths for recommend + validator report.
+    If user provided explicit output paths, honor them (don’t force folders).
+    Otherwise create output/YYYY-MM-DD/HHMMSS/{recommend.csv, validator_report.csv}.
+    """
+    if user_out or user_report:
+        # Respect user overrides; still ensure parent dirs exist
+        rec_path = Path(user_out) if user_out else None
+        rep_path = Path(user_report) if user_report else None
+        if rec_path:
+            rec_path.parent.mkdir(parents=True, exist_ok=True)
+        if rep_path:
+            rep_path.parent.mkdir(parents=True, exist_ok=True)
+        # If one is None, create a sibling in the same dir
+        if rec_path and not rep_path:
+            rep_path = rec_path.with_name("validator_report.csv")
+        if rep_path and not rec_path:
+            rec_dir = rep_path.parent
+            rec_path = rec_dir / "recommend.csv"
+        return rec_path, rep_path
+
+    run_dir = _new_run_dir()
+    return run_dir / "recommend.csv", run_dir / "validator_report.csv"
+
+def _default_path_for_price(rec_path: Path | None, user_out: str | None):
+    """
+    Price output path. If user_out provided, honor it.
+    Else, if rec_path is inside a timestamped folder, reuse that folder.
+    Else, create a fresh timestamped folder.
+    """
+    if user_out:
+        out = Path(user_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return out
+
+    reuse_dir = _derive_run_dir_from_recommend(rec_path) if rec_path else None
+    run_dir = reuse_dir if reuse_dir else _new_run_dir()
+    return run_dir / "price.csv"
 
 # ---------------------- Utilities ----------------------
 def make_output_path(cmd: str, user_out: Optional[str] = None) -> str:
@@ -49,14 +121,34 @@ def make_output_path(cmd: str, user_out: Optional[str] = None) -> str:
     return str(out_dir / f"{cmd}_{ts}.csv")
 
 
-def find_latest_output(patterns=("output/recommend_*.csv", "output/recommend_*.xlsx")) -> Optional[Path]:
-    """Find the most-recent recommendation output file."""
-    from glob import glob
+def find_latest_output(patterns: Optional[List[str]] = None) -> Optional[Path]:
+    """
+    Find the most-recent *recommend* output file.
+
+    Supports new nested layout:
+        output/YYYY-MM-DD/HHMMSS/recommend.csv|xlsx|xls
+    and legacy flat layout:
+        output/recommend_*.csv|xlsx|xls
+    """
+    if patterns is None:
+        patterns = [
+            # New nested layout
+            "output/**/recommend.csv",
+            "output/**/recommend.xlsx",
+            "output/**/recommend.xls",
+            # Legacy flat files
+            "output/recommend_*.csv",
+            "output/recommend_*.xlsx",
+            "output/recommend_*.xls",
+        ]
+
     candidates: List[str] = []
     for pat in patterns:
-        candidates.extend(glob(pat))
+        candidates.extend(glob(pat, recursive=True))  # ← recursive is key
+
     if not candidates:
         return None
+
     return max((Path(p) for p in candidates), key=lambda p: p.stat().st_mtime)
 
 
@@ -131,16 +223,17 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
 
     # ---- Validate (no defaults; report-only) ----
     ok_idx, rec_only_idx, error_idx, report_rows = validate_dataframe(df, input_file=str(in_path))
-    if validator_report_path is None:
-        validator_report_path = Path("output") / f"validator_report_{ts}.csv"
-    write_validator_report(report_rows, str(validator_report_path))
+    rec_out_path, rep_out_path = _default_paths_for_recommend(output_path, validator_report_path)
+ 
+    from validator import write_validator_report
+    write_validator_report(report_rows, str(rep_out_path))
 
     total = len(df)
     click.echo(f"Validation: rows={total} | ok={len(ok_idx)} | rec_only={len(rec_only_idx)} | error={len(error_idx)}")
 
     if strict and (len(error_idx) > 0 or len(rec_only_idx) > 0):
         click.echo(
-            f"Strict mode: failing due to rows that block recommendation or pricing. See: {validator_report_path}",
+            f"Strict mode: failing due to rows that block recommendation or pricing. See: {rep_out_path}",
             err=True,
         )
         sys.exit(2)
@@ -233,18 +326,23 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
         click.echo("No valid rows to output (all rows errored). See validator report.", err=True)
         sys.exit(2)
 
+# ---- Write results (same run folder as validator) ----
     out_df = pd.DataFrame(results)
-    output_path = Path(output_path or (Path("output") / f"recommend_{ts}.csv"))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if output_path.suffix.lower() in {".xlsx", ".xls"}:
-        with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+    rec_out = Path(rec_out_path)   # from _default_paths_for_recommend(...)
+    rep_out = Path(rep_out_path)
+
+    rec_out.parent.mkdir(parents=True, exist_ok=True)
+
+    if rec_out.suffix.lower() in {".xlsx", ".xls"}:
+        with pd.ExcelWriter(rec_out, engine="xlsxwriter") as writer:
             out_df.to_excel(writer, index=False, sheet_name="Results")
     else:
-        out_df.to_csv(output_path, index=False)
+        out_df.to_csv(rec_out, index=False)
 
-    click.echo(f"Wrote recommendations -> {output_path}")
-    click.echo(f"Wrote validator report -> {validator_report_path}")
+    click.echo(f"Wrote recommendations -> {rec_out}")
+    click.echo(f"Wrote validator report -> {rep_out}")
+
 
 @cli.command(name="list-aws-regions")
 def list_aws_regions():
@@ -264,7 +362,7 @@ def list_azure_regions():
               help="Cloud of the recommendation file to be priced.")
 @click.option("--in", "in_path", required=False,
               help="Recommendation CSV/Excel to price. If omitted, will use --latest.")
-@click.option("--latest", is_flag=True, help="Use the most recent recommend_* file from ./output.")
+@click.option("--latest", is_flag=True, help="Use the most recent recommend file from ./output (nested folders supported).")
 @click.option("--region", required=False, help="Default AWS region if missing in rows (e.g., us-east-1).")
 @click.option("--os", "os_name", type=click.Choice(["Linux", "Windows", "RHEL", "SUSE"], case_sensitive=False),
               default="Linux", show_default=True)
@@ -278,13 +376,13 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     """
     expected_cloud = cloud_from_str(cloud)
 
-    # Resolve input file
+    # --- Resolve input recommend file ---
     rec_path: Optional[Path] = Path(in_path) if in_path else None
     if not rec_path:
         if latest:
-            rec_path = find_latest_output()
+            rec_path = find_latest_output()  # must search recursively for nested recommend files
             if not rec_path:
-                raise SystemExit("❌ --latest set but no recommendation files found in ./output")
+                raise SystemExit("❌ --latest set but no recommendation files found under ./output")
             print(f"ℹ️  Using latest recommendation file: {rec_path}")
         else:
             raise SystemExit("❌ Please provide --in <file> or use --latest.")
@@ -292,14 +390,16 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     if not rec_path.exists():
         raise SystemExit(f"❌ Input file not found: {rec_path}")
 
-    # Read rows (read_rows already supports CSV/Excel; uses first sheet for Excel)
+    # --- Decide price output path (same run folder as recommend if possible) ---
+    price_out_path = _default_path_for_price(rec_path, output_path)
+
+    # --- Read and validate rows ---
     rows = read_rows(str(rec_path), sheet=None)
     if not rows:
         raise SystemExit("❌ Input file has no rows.")
 
-    # Validate single-cloud file
     seen = {(str(r.get("cloud", "")).strip().lower() or "") for r in rows}
-    seen.discard("")  # allow older files with no 'cloud'; they inherit CLI cloud
+    seen.discard("")
     if seen:
         if len(seen) > 1 or next(iter(seen)) != expected_cloud:
             human = ", ".join(sorted(seen))
@@ -308,6 +408,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 "Price with the matching --cloud or re-run 'recommend' for a single cloud."
             )
 
+    # --- Pricing loop ---
     out_rows: List[dict] = []
     for r in rows:
         row_cloud = expected_cloud
@@ -318,7 +419,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         os_row = (r.get("os") or os_name or "Linux").strip()
         license_model = (r.get("license_model") or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
 
-        # BYOL → treat compute as Linux price component
+        # BYOL → compute charged as Linux
         os_for_compute = "Linux" if license_model.lower() == "byol" else os_row
 
         # Compute hourly price
@@ -349,7 +450,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         else:
             r["price_per_hour_usd"] = f"{compute_price:.6f}" if compute_price is not None else ""
             r["monthly_compute_usd"] = f"{compute_monthly:.2f}"
-            # Optional inputs for storage/network/db; default to 0 when absent
+
             ebs_gb = as_float(r.get("ebs_gb"), 0.0)
             ebs_type = (r.get("ebs_type") or "gp3").strip()
             s3_gb = as_float(r.get("s3_gb"), 0.0)
@@ -371,7 +472,6 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 db_monthly = 0.0
 
             r["monthly_db_usd"] = f"{db_monthly:.2f}"
-
             parts = [
                 as_float(r["monthly_compute_usd"]),
                 as_float(r["monthly_ebs_usd"]),
@@ -384,7 +484,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         r["provider"] = row_cloud
         out_rows.append(r)
 
-    # Ensure consistent column order
+    # --- Write file ---
     fieldnames = list(out_rows[0].keys())
     for col in [
         "provider", "price_per_hour_usd", "monthly_compute_usd", "monthly_ebs_usd",
@@ -394,12 +494,12 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         if col not in fieldnames:
             fieldnames.append(col)
 
-    out_path = make_output_path("price", output_path)
+    out_path = Path(price_out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Input:  {rec_path}")
     print(f"Output: {out_path}")
-    write_rows(out_path, out_rows, fieldnames)
+    write_rows(str(out_path), out_rows, fieldnames)
     print(f"Wrote priced recommendations → {out_path}")
-
 
 # ---------------------- entry ----------------------
 if __name__ == "__main__":
