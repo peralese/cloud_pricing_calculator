@@ -174,6 +174,20 @@ def as_bool(x, default=False):
     return default
 
 
+_NULLISH_STR = {"", "nan", "null", "none", "n/a", "#n/a"}
+def norm_str(x, default: Optional[str] = "") -> str:
+    """Normalize possibly-missing/NaN values from CSV/Excel into a clean string.
+    Returns `default` when the value is nullish."""
+    if x is None:
+        return default or ""
+    try:
+        s = str(x).strip()
+    except Exception:
+        return default or ""
+    if s.lower() in _NULLISH_STR:
+        return default or ""
+    return s
+
 def cloud_from_str(s: Optional[str]) -> str:
     s = (s or "").strip().lower()
     if s in ("azure", "az"):
@@ -398,7 +412,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     if not rows:
         raise SystemExit("❌ Input file has no rows.")
 
-    seen = {(str(r.get("cloud", "")).strip().lower() or "") for r in rows}
+    seen = {norm_str(r.get("cloud"), "").lower() for r in rows}
     seen.discard("")
     if seen:
         if len(seen) > 1 or next(iter(seen)) != expected_cloud:
@@ -414,10 +428,10 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         row_cloud = expected_cloud
         r["cloud"] = expected_cloud  # make explicit in output
 
-        itype = r.get("recommended_instance_type") or r.get("instance_type") or ""
-        region_row = (r.get("region") or region or ("eastus" if row_cloud == "azure" else None))
-        os_row = (r.get("os") or os_name or "Linux").strip()
-        license_model = (r.get("license_model") or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
+        itype = norm_str(r.get("recommended_instance_type")) or norm_str(r.get("instance_type"))
+        region_row = norm_str(r.get("region")) or norm_str(region) or ("eastus" if row_cloud == "azure" else None)
+        os_row = norm_str(r.get("os"), os_name) or (os_name or "Linux")
+        license_model = norm_str(r.get("license_model"), ("AWS" if row_cloud == "aws" else "BYOL"))
 
         # BYOL → compute charged as Linux
         os_for_compute = "Linux" if license_model.lower() == "byol" else os_row
@@ -452,17 +466,17 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
             r["monthly_compute_usd"] = f"{compute_monthly:.2f}"
 
             ebs_gb = as_float(r.get("ebs_gb"), 0.0)
-            ebs_type = (r.get("ebs_type") or "gp3").strip()
+            ebs_type = norm_str(r.get("ebs_type"), "gp3").lower()
             s3_gb = as_float(r.get("s3_gb"), 0.0)
-            net_prof = (r.get("network_profile") or "").strip()
+            net_prof = norm_str(r.get("network_profile"), "").lower()
 
             r["monthly_ebs_usd"] = f"{monthly_ebs_cost(ebs_gb, ebs_type):.2f}"
             r["monthly_s3_usd"] = f"{monthly_s3_cost(s3_gb):.2f}"
             r["monthly_network_usd"] = f"{monthly_network_cost(net_prof):.2f}"
 
             if row_cloud == "aws":
-                db_engine = (r.get("db_engine") or "").strip()
-                db_class = (r.get("db_instance_class") or "").strip()
+                db_engine = norm_str(r.get("db_engine"), "")
+                db_class = norm_str(r.get("db_instance_class"), "")
                 db_multi_az = as_bool(r.get("multi_az"), False)
                 if db_engine and db_class and region_row:
                     db_monthly = monthly_rds_cost(db_engine, db_class, region_row, license_model, db_multi_az, hours)

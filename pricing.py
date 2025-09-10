@@ -43,10 +43,21 @@ def read_rows(path: str, sheet: Optional[str] = None) -> List[dict]:
         sys.exit(1)
 
 def write_rows(path: str, rows: List[dict], fieldnames: List[str]) -> None:
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    p = Path(path); suff = p.suffix.lower()
+    if suff in {".xlsx", ".xls"}:
+        pd = _lazy_pandas()
+        frame = pd.DataFrame(rows, columns=fieldnames)
+        try:
+            with pd.ExcelWriter(p, engine="xlsxwriter") as writer:
+                frame.to_excel(writer, index=False, sheet_name="Results")
+        except Exception:
+            frame.to_excel(p, index=False, sheet_name="Results")
+        return
+    with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        for r in rows: w.writerow(r)
+        for r in rows:
+            w.writerow(r)
 
 # ---------- AWS pricing ----------
 def _lazy_boto3():
@@ -325,5 +336,4 @@ def monthly_network_cost(profile: str) -> float:
 def monthly_rds_cost(engine: str, instance_class: str, region: str, license_model: str, multi_az: bool, hours: float) -> float:
     p = price_rds_ondemand(engine, instance_class, region, license_model=license_model, multi_az=multi_az)
     return round((p or 0.0) * hours, 2)
-
 
