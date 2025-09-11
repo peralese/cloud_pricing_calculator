@@ -16,6 +16,11 @@ NETWORK_PROFILE_TO_GB = {
     "high":  float(os.getenv("NETWORK_EGRESS_GB_HIGH", "5000")),
 }
 
+def _cache_age_days(p: Path) -> float:
+    try:
+        return (time.time() - p.stat().st_mtime) / 86400.0
+    except FileNotFoundError:
+        return 1e9
 # ---------- I/O ----------
 def _lazy_pandas():
     try:
@@ -248,30 +253,26 @@ def _azure_fetch_retail_prices(region: str, sku_core: str, os_name: str, timeout
     else:
         return best_linux if best_linux is not None else best_windows
 
-def _azure_live_compute_hourly(region: str, sku: str, os_name: str, refresh: bool = False) -> Optional[float]:
-    """
-    Load cached price or fetch from API and update cache.
-    Cache schema: { "<sku_core>|<os>": { "price": float, "ts": epoch_seconds } }
-    """
+def _azure_live_compute_hourly(region: str, sku: str, os_name: str, refresh: bool = False, ttl_days: float | None = None) -> Optional[float]:
     region = region.strip().lower()
     sku_core = _normalize_azure_sku(sku)
     key = _azure_price_key(sku_core, os_name)
 
-    cache = {} if refresh else _azure_cache_load(region)
+    cache_path = _azure_cache_path(region)
+    cache_ok = (not refresh) and (ttl_days is None or _cache_age_days(cache_path) <= float(ttl_days))
+    cache = _azure_cache_load(region) if cache_ok else {}
     hit = cache.get(key)
-    if hit and not refresh:
+    if hit and cache_ok:
         val = hit.get("price")
         if isinstance(val, (int, float)):
             return float(val)
 
-    # fetch live
     price = _azure_fetch_retail_prices(region, sku_core, os_name)
     if price is None:
         return None
     cache[key] = {"price": float(price), "ts": int(time.time())}
     _azure_cache_save(region, cache)
     return float(price)
-
 
 
 def _azure_price_override(region: str, sku: str, os_name: str, license_model: str) -> Optional[float]:
@@ -297,11 +298,12 @@ _AZ_OS_UPLIFT = {
     "suse": 0.07,
 }
 
-def azure_vm_price_hourly(region: str, sku: str, os_name: str, license_model: str, refresh=False) -> float:
-    # 0) Live API + cache
-    live = _azure_live_compute_hourly(region, sku, os_name, refresh=refresh)
+def azure_vm_price_hourly(region: str, sku: str, os_name: str, license_model: str, refresh=False, ttl_days: float | None = None) -> float:
+    live = _azure_live_compute_hourly(region, sku, os_name, refresh=refresh, ttl_days=ttl_days)
     if live is not None:
         return live
+    ...
+
 
     # 1) User override JSON
     o = _azure_price_override(region, sku, os_name, license_model)

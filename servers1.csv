@@ -1,3 +1,23 @@
 id,vcpu,memory_gib,profile,os,license_model,ebs_gb,ebs_type,s3_gb,network_profile,db_engine,db_instance_class,multi_az,region
-web-01,2,8,balanced,Linux,AWS,100,gp3,50,low,PostgreSQL,db.m5.large,false,eastus
-etl-01,8,32,memory,Linux,BYOL,500,io1,200,medium,MySQL,db.m5.xlarge,true,eastus
+web-01,2,8,balanced,Linux,AWS,100,gp3,50,low,PostgreSQL,db.m5.large,FALSE,eastus
+etl-01,8,32,memory,Linux,BYOL,500,io1,200,medium,MySQL,db.m5.xlarge,TRUE,eastus
+az-srv-001,2,4,general-purpose,Ubuntu 22.04 LTS,license-included,128,PremiumSSD,100,Up to 1 Gbps,,,FALSE,eastus
+az-srv-002,4,16,compute-optimized,Azure Linux (CBL-Mariner),license-included,256,PremiumSSD,200,Up to 5 Gbps,,,FALSE,westus2
+az-srv-003,8,32,memory-optimized,RHEL 9,bring-your-own-license,1024,PremiumSSD_v2,500,Up to 10 Gbps,Azure Database for PostgreSQL 16,Standard_D4s_v5,TRUE,westeurope
+az-srv-004,16,64,memory-optimized,Ubuntu 22.04 LTS,license-included,2048,UltraSSD,500,25 Gbps,Azure SQL Managed Instance,Gen5-16vCores,TRUE,uksouth
+az-srv-005,2,8,general-purpose,Windows Server 2022,azure-hybrid-benefit,256,StandardSSD,100,Up to 2 Gbps,,,FALSE,northeurope
+az-srv-006,4,8,storage-optimized,Ubuntu 22.04 LTS,license-included,8192,StandardHDD,2000,10 Gbps,,,FALSE,centralus
+az-srv-007,8,16,compute-optimized,Debian 12,license-included,512,PremiumSSD,150,10 Gbps,,,FALSE,southeastasia
+az-srv-008,32,128,gpu,Ubuntu 22.04 LTS,license-included,2048,PremiumSSD_v2,500,40 Gbps,Azure Database for MySQL 8.0,Standard_E8ds_v5,FALSE,japaneast
+az-srv-009,2,4,general-purpose,Azure Linux (CBL-Mariner),license-included,64,StandardSSD,50,Up to 1 Gbps,,,FALSE,canadacentral
+az-srv-010,48,384,memory-optimized,RHEL 8,bring-your-own-license,4096,UltraSSD,1500,100 Gbps,Azure SQL Database (Business Critical),BC-Gen5-32vCores,TRUE,germanywestcentral
+az-srv-011,4,16,database,Azure Linux (CBL-Mariner),license-included,1024,PremiumSSD_v2,200,5 Gbps,Azure Database for PostgreSQL 15,Standard_D8s_v5,TRUE,eastus
+az-srv-012,16,32,database,Windows Server 2019,azure-hybrid-benefit,2048,PremiumSSD_v2,250,10 Gbps,SQL Server 2019 Enterprise (VM),Standard_E16ds_v5,TRUE,westus2
+az-srv-013,8,64,memory-optimized,Ubuntu 24.04 LTS,license-included,1024,PremiumSSD,300,25 Gbps,,,FALSE,francecentral
+az-srv-014,2,2,general-purpose,Debian 12,license-included,64,StandardSSD,10,Up to 1 Gbps,,,FALSE,norwayeast
+az-srv-015,32,64,compute-optimized,Ubuntu 22.04 LTS,license-included,1500,PremiumSSD,400,25 Gbps,Azure Database for PostgreSQL 16,Standard_D16s_v5,FALSE,australiaeast
+az-srv-016,64,512,memory-optimized,RHEL 8,bring-your-own-license,12000,UltraSSD,3000,100 Gbps,SAP HANA (cert.),E64is_v5,TRUE,westeurope
+az-srv-017,4,8,general-purpose,Azure Linux (CBL-Mariner),license-included,120,StandardSSD,80,5 Gbps,,,FALSE,southafricanorth
+az-srv-018,8,32,database,Ubuntu 22.04 LTS,license-included,1500,PremiumSSD_v2,200,10 Gbps,Azure Database for PostgreSQL 14,Standard_E8ds_v5,TRUE,koreacentral
+az-srv-019,16,128,storage-optimized,Azure Linux (CBL-Mariner),license-included,16000,StandardHDD,5000,25 Gbps,,,FALSE,brazilsouth
+az-srv-020,2,4,edge,Ubuntu 22.04 LTS,license-included,50,StandardSSD,5,Up to 1 Gbps,,,FALSE,uaenorth

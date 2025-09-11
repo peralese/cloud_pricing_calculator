@@ -1,21 +1,24 @@
 # main.py
-import os
+from __future__ import annotations
+
 import sys
-import re
-import time
-import datetime
 from pathlib import Path
 from typing import Optional, List, Dict
+import re
 
 import click
 import pandas as pd
-from pathlib import Path
-from typing import Optional, List
-from glob import glob
 
-from validator import validate_dataframe, write_validator_report
-from validator import AWS_REGIONS, AZURE_REGIONS
+try:
+    from summary import write_run_summary
+except ImportError:
+    write_run_summary = None
 
+# ---------------------- Imports from local modules ----------------------
+from validator import (
+    validate_dataframe,
+    write_validator_report,
+)
 from recommender import (
     infer_profile,
     fetch_instance_catalog,           # AWS
@@ -26,7 +29,6 @@ from recommender import (
     pick_azure_size,
     normalize_azure_region,           # Azure region normalizer
 )
-
 from pricing import (
     read_rows, write_rows,
     price_ec2_ondemand,
@@ -34,14 +36,42 @@ from pricing import (
     monthly_network_cost, monthly_rds_cost,
 )
 
-# If your project exposes Azure compute prices via pricing.azure_vm_price_hourly,
-# import it; otherwise, stub gracefully and error only if used.
+# Azure VM price function may be optional depending on your tree — import defensively.
 try:
     from pricing import azure_vm_price_hourly  # type: ignore
-except Exception:  # pragma: no cover
-    azure_vm_price_hourly = None
+except Exception:
+    azure_vm_price_hourly = None  # type: ignore
 
-#  -------- Output helpers (date/timestamped folders) --------
+
+# ---------------------- Small utilities ----------------------
+def as_float(x, default=0.0) -> float:
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def as_bool(x, default=False) -> bool:
+    if isinstance(x, bool):
+        return x
+    if x is None:
+        return default
+    s = str(x).strip().lower()
+    if s in {"y", "yes", "true", "1"}:
+        return True
+    if s in {"n", "no", "false", "0"}:
+        return False
+    return default
+
+def cloud_from_str(s: Optional[str]) -> str:
+    s = (s or "").strip().lower()
+    if s in ("azure", "az"):
+        return "azure"
+    return "aws"
+
+
+# ---------------------- Output helpers (date/timestamped folders) ----------------------
 def _now_date_time():
     import datetime as _dt
     d = _dt.datetime.now()
@@ -51,7 +81,7 @@ def _ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-def _derive_run_dir_from_recommend(rec_path: Path) -> Path | None:
+def _derive_run_dir_from_recommend(rec_path: Path) -> Optional[Path]:
     """
     If the recommend file already lives in output/YYYY-MM-DD/HHMMSS/,
     reuse that directory. Otherwise return None.
@@ -70,32 +100,31 @@ def _new_run_dir(base: Path = Path("output")) -> Path:
     date_str, time_str = _now_date_time()
     return _ensure_dir(base / date_str / time_str)
 
-def _default_paths_for_recommend(user_out: str | None, user_report: str | None):
+def _default_paths_for_recommend(user_out: Optional[str], user_report: Optional[str]) -> tuple[Path, Path]:
     """
     Decide file paths for recommend + validator report.
+
     If user provided explicit output paths, honor them (don’t force folders).
     Otherwise create output/YYYY-MM-DD/HHMMSS/{recommend.csv, validator_report.csv}.
     """
     if user_out or user_report:
-        # Respect user overrides; still ensure parent dirs exist
         rec_path = Path(user_out) if user_out else None
         rep_path = Path(user_report) if user_report else None
         if rec_path:
             rec_path.parent.mkdir(parents=True, exist_ok=True)
         if rep_path:
             rep_path.parent.mkdir(parents=True, exist_ok=True)
-        # If one is None, create a sibling in the same dir
+        # If only one provided, place the sibling next to it.
         if rec_path and not rep_path:
             rep_path = rec_path.with_name("validator_report.csv")
         if rep_path and not rec_path:
-            rec_dir = rep_path.parent
-            rec_path = rec_dir / "recommend.csv"
-        return rec_path, rep_path
+            rec_path = rep_path.parent / "recommend.csv"
+        return rec_path, rep_path  # type: ignore[return-value]
 
     run_dir = _new_run_dir()
     return run_dir / "recommend.csv", run_dir / "validator_report.csv"
 
-def _default_path_for_price(rec_path: Path | None, user_out: str | None):
+def _default_path_for_price(rec_path: Optional[Path], user_out: Optional[str]) -> Path:
     """
     Price output path. If user_out provided, honor it.
     Else, if rec_path is inside a timestamped folder, reuse that folder.
@@ -110,17 +139,6 @@ def _default_path_for_price(rec_path: Path | None, user_out: str | None):
     run_dir = reuse_dir if reuse_dir else _new_run_dir()
     return run_dir / "price.csv"
 
-# ---------------------- Utilities ----------------------
-def make_output_path(cmd: str, user_out: Optional[str] = None) -> str:
-    """Return output path, ensuring ./output exists."""
-    if user_out:
-        return user_out
-    out_dir = Path("output")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    return str(out_dir / f"{cmd}_{ts}.csv")
-
-
 def find_latest_output(patterns: Optional[List[str]] = None) -> Optional[Path]:
     """
     Find the most-recent *recommend* output file.
@@ -130,6 +148,8 @@ def find_latest_output(patterns: Optional[List[str]] = None) -> Optional[Path]:
     and legacy flat layout:
         output/recommend_*.csv|xlsx|xls
     """
+    from glob import glob
+
     if patterns is None:
         patterns = [
             # New nested layout
@@ -144,7 +164,7 @@ def find_latest_output(patterns: Optional[List[str]] = None) -> Optional[Path]:
 
     candidates: List[str] = []
     for pat in patterns:
-        candidates.extend(glob(pat, recursive=True))  # ← recursive is key
+        candidates.extend(glob(pat, recursive=True))
 
     if not candidates:
         return None
@@ -152,72 +172,57 @@ def find_latest_output(patterns: Optional[List[str]] = None) -> Optional[Path]:
     return max((Path(p) for p in candidates), key=lambda p: p.stat().st_mtime)
 
 
-def as_float(x, default=0.0):
-    try:
-        if x is None or x == "":
-            return default
-        return float(x)
-    except Exception:
-        return default
-
-
-def as_bool(x, default=False):
-    if isinstance(x, bool):
-        return x
-    if x is None:
-        return default
-    s = str(x).strip().lower()
-    if s in {"y", "yes", "true", "1"}:
-        return True
-    if s in {"n", "no", "false", "0"}:
-        return False
-    return default
-
-
-_NULLISH_STR = {"", "nan", "null", "none", "n/a", "#n/a"}
-def norm_str(x, default: Optional[str] = "") -> str:
-    """Normalize possibly-missing/NaN values from CSV/Excel into a clean string.
-    Returns `default` when the value is nullish."""
-    if x is None:
-        return default or ""
-    try:
-        s = str(x).strip()
-    except Exception:
-        return default or ""
-    if s.lower() in _NULLISH_STR:
-        return default or ""
-    return s
-
-def cloud_from_str(s: Optional[str]) -> str:
-    s = (s or "").strip().lower()
-    if s in ("azure", "az"):
-        return "azure"
-    return "aws"
-
-
-# ---------------------- CLI ----------------------
+# ---------------------- CLI root ----------------------
 @click.group()
 def cli():
-    """Cloud Pricing Calculator CLI (Click-only)."""
+    """Cloud Pricing Calculator CLI."""
     pass
+
+
+# ---------------------- list regions (helpers) ----------------------
+@cli.command(name="list-aws-regions")
+def list_aws_regions():
+    """Print supported AWS region codes."""
+    try:
+        from validator import AWS_REGIONS
+        regions = sorted(AWS_REGIONS)
+    except Exception:
+        regions = []
+    if not regions:
+        click.echo("No AWS regions table available in validator.py")
+    else:
+        for r in regions:
+            click.echo(r)
+
+@cli.command(name="list-azure-regions")
+def list_azure_regions():
+    """Print supported Azure region slugs."""
+    try:
+        from validator import AZURE_REGIONS
+        regions = sorted(AZURE_REGIONS)
+    except Exception:
+        regions = []
+    if not regions:
+        click.echo("No Azure regions table available in validator.py")
+    else:
+        for r in regions:
+            click.echo(r)
 
 
 # ---------------------- recommend ----------------------
 @cli.command(name="recommend")
 @click.option("--in", "in_path", required=True, help="Input CSV/Excel file.")
 @click.option("--cloud", type=click.Choice(["aws", "azure"], case_sensitive=False), required=True)
-@click.option("--region", required=False, help="AWS region for AWS runs (e.g., us-east-1). Azure uses per-row region or 'eastus' fallback.")
-@click.option("--strict", is_flag=True, help="Fail if any row blocks recommendation or pricing (validator).")
+@click.option("--region", required=False, help="AWS region for AWS runs (e.g., us-east-1). Azure uses per-row region.")
+@click.option("--strict", is_flag=True, help="Fail (non-zero) if any row is rec_only or error.")
 @click.option("--validator-report", "validator_report_path", default=None,
-              help="Path for validator report CSV (default: ./output/validator_report_<timestamp>.csv).")
-@click.option("--output", "output_path", default=None, help="Output file path (CSV/Excel).")
+              help="Path for validator report CSV (default: run folder).")
+@click.option("--output", "output_path", default=None, help="Output file path (CSV/Excel) for recommendations.")
 def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_path):
     """
     Validate rows (no defaults). Recommend sizes for OK and REC_ONLY rows.
     Pricing is not performed here; use the 'price' command afterwards.
     """
-    ts = time.strftime("%Y%m%d-%H%M%S")
-
     in_path = Path(in_path)
     if not in_path.exists():
         click.echo(f"ERROR: Input file not found: {in_path}", err=True)
@@ -235,11 +240,21 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
     if region:
         df["region"] = region
 
+    # Azure preflight (fail fast) — only if running Azure
+    if cloud_from_str(cloud) == "azure":
+        try:
+            from azure_preflight import ensure_azure_ready, AzurePreflightError  # type: ignore
+            ensure_azure_ready()
+        except Exception as e:
+            click.echo(f"❌ Azure preflight failed: {e}", err=True)
+            sys.exit(2)
+
     # ---- Validate (no defaults; report-only) ----
     ok_idx, rec_only_idx, error_idx, report_rows = validate_dataframe(df, input_file=str(in_path))
+
+    # Build default output paths in a date/timestamped run folder (unless user overrides)
     rec_out_path, rep_out_path = _default_paths_for_recommend(output_path, validator_report_path)
- 
-    from validator import write_validator_report
+
     write_validator_report(report_rows, str(rep_out_path))
 
     total = len(df)
@@ -340,12 +355,11 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
         click.echo("No valid rows to output (all rows errored). See validator report.", err=True)
         sys.exit(2)
 
-# ---- Write results (same run folder as validator) ----
     out_df = pd.DataFrame(results)
 
-    rec_out = Path(rec_out_path)   # from _default_paths_for_recommend(...)
+    # Write to CSV or Excel at the chosen path (same run folder as validator)
+    rec_out = Path(rec_out_path)
     rep_out = Path(rep_out_path)
-
     rec_out.parent.mkdir(parents=True, exist_ok=True)
 
     if rec_out.suffix.lower() in {".xlsx", ".xls"}:
@@ -357,18 +371,11 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
     click.echo(f"Wrote recommendations -> {rec_out}")
     click.echo(f"Wrote validator report -> {rep_out}")
 
-
-@cli.command(name="list-aws-regions")
-def list_aws_regions():
-    """Print supported AWS region codes."""
-    for r in sorted(AWS_REGIONS):
-        click.echo(r)
-
-@cli.command(name="list-azure-regions")
-def list_azure_regions():
-    """Print supported Azure region slugs."""
-    for r in sorted(AZURE_REGIONS):
-        click.echo(r)
+    if write_run_summary:
+        try:
+            write_run_summary(Path(rec_out).parent, rec_out, None)
+        except Exception as e:
+            click.echo(f"⚠️ Summary generation failed: {e}", err=True)
 
 # ---------------------- price ----------------------
 @cli.command(name="price")
@@ -394,7 +401,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     rec_path: Optional[Path] = Path(in_path) if in_path else None
     if not rec_path:
         if latest:
-            rec_path = find_latest_output()  # must search recursively for nested recommend files
+            rec_path = find_latest_output()
             if not rec_path:
                 raise SystemExit("❌ --latest set but no recommendation files found under ./output")
             print(f"ℹ️  Using latest recommendation file: {rec_path}")
@@ -412,7 +419,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     if not rows:
         raise SystemExit("❌ Input file has no rows.")
 
-    seen = {norm_str(r.get("cloud"), "").lower() for r in rows}
+    seen = {(str(r.get("cloud", "")).strip().lower() or "") for r in rows}
     seen.discard("")
     if seen:
         if len(seen) > 1 or next(iter(seen)) != expected_cloud:
@@ -428,12 +435,12 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         row_cloud = expected_cloud
         r["cloud"] = expected_cloud  # make explicit in output
 
-        itype = norm_str(r.get("recommended_instance_type")) or norm_str(r.get("instance_type"))
-        region_row = norm_str(r.get("region")) or norm_str(region) or ("eastus" if row_cloud == "azure" else None)
-        os_row = norm_str(r.get("os"), os_name) or (os_name or "Linux")
-        license_model = norm_str(r.get("license_model"), ("AWS" if row_cloud == "aws" else "BYOL"))
+        itype = r.get("recommended_instance_type") or r.get("instance_type") or ""
+        region_row = (r.get("region") or region or ("eastus" if row_cloud == "azure" else None))
+        os_row = (r.get("os") or os_name or "Linux").strip()
+        license_model = (r.get("license_model") or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
 
-        # BYOL → compute charged as Linux
+        # BYOL → treat compute as Linux price component
         os_for_compute = "Linux" if license_model.lower() == "byol" else os_row
 
         # Compute hourly price
@@ -466,17 +473,17 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
             r["monthly_compute_usd"] = f"{compute_monthly:.2f}"
 
             ebs_gb = as_float(r.get("ebs_gb"), 0.0)
-            ebs_type = norm_str(r.get("ebs_type"), "gp3").lower()
+            ebs_type = (r.get("ebs_type") or "gp3").strip()
             s3_gb = as_float(r.get("s3_gb"), 0.0)
-            net_prof = norm_str(r.get("network_profile"), "").lower()
+            net_prof = (r.get("network_profile") or "").strip()
 
             r["monthly_ebs_usd"] = f"{monthly_ebs_cost(ebs_gb, ebs_type):.2f}"
             r["monthly_s3_usd"] = f"{monthly_s3_cost(s3_gb):.2f}"
             r["monthly_network_usd"] = f"{monthly_network_cost(net_prof):.2f}"
 
             if row_cloud == "aws":
-                db_engine = norm_str(r.get("db_engine"), "")
-                db_class = norm_str(r.get("db_instance_class"), "")
+                db_engine = (r.get("db_engine") or "").strip()
+                db_class = (r.get("db_instance_class") or "").strip()
                 db_multi_az = as_bool(r.get("multi_az"), False)
                 if db_engine and db_class and region_row:
                     db_monthly = monthly_rds_cost(db_engine, db_class, region_row, license_model, db_multi_az, hours)
@@ -515,8 +522,15 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     write_rows(str(out_path), out_rows, fieldnames)
     print(f"Wrote priced recommendations → {out_path}")
 
+    if write_run_summary:
+        try:
+            write_run_summary(Path(out_path).parent, None, out_path)
+        except Exception as e:
+            print(f"⚠️ Summary generation failed: {e}")
+
 # ---------------------- entry ----------------------
 if __name__ == "__main__":
     cli()
+
 
 

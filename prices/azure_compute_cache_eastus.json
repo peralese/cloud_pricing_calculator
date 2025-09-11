@@ -10,5 +10,13 @@
   "B4as v2|linux": {
     "price": 0.15,
     "ts": 1757301720
+  },
+  "A2 v2|ubuntu 22.04 lts": {
+    "price": 0.0903,
+    "ts": 1757563550
+  },
+  "B4as v2|azure linux (cbl-mariner)": {
+    "price": 0.15,
+    "ts": 1757563557
   }
 }
