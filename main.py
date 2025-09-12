@@ -373,7 +373,9 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
 
     if write_run_summary:
         try:
-            write_run_summary(Path(rec_out).parent, rec_out, None)
+            run_dir = Path(rec_out).parent
+            write_run_summary(run_dir, rec_out, None)
+            # write_run_summary(Path(rec_out).parent, rec_out, None)
         except Exception as e:
             click.echo(f"⚠️ Summary generation failed: {e}", err=True)
 
@@ -524,7 +526,9 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
 
     if write_run_summary:
         try:
-            write_run_summary(Path(out_path).parent, None, out_path)
+            run_dir = Path(out_path).parent
+            write_run_summary(run_dir, None, out_path)
+            # write_run_summary(Path(out_path).parent, None, out_path)
         except Exception as e:
             print(f"⚠️ Summary generation failed: {e}")
 
