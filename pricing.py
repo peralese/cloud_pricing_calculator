@@ -21,6 +21,7 @@ def _cache_age_days(p: Path) -> float:
         return (time.time() - p.stat().st_mtime) / 86400.0
     except FileNotFoundError:
         return 1e9
+
 # ---------- I/O ----------
 def _lazy_pandas():
     try:
@@ -29,6 +30,36 @@ def _lazy_pandas():
     except ImportError:
         print("Excel input requested but pandas is missing. Install with:\n  pip install pandas openpyxl", file=sys.stderr)
         sys.exit(1)
+
+def _autosize_and_style_excel(writer, df, sheet_name: str = "Results") -> None:
+    """
+    Basic polish: autofilter, freeze header, auto column widths.
+    Compatible with xlsxwriter engine.
+    """
+    try:
+        ws = writer.sheets.get(sheet_name)
+        if ws is None:
+            return
+        # Add autofilter on entire range
+        nrows, ncols = df.shape
+        ws.autofilter(0, 0, max(nrows - 1, 0), max(ncols - 1, 0))
+        # Freeze header row
+        ws.freeze_panes(1, 0)
+        # Compute widths
+        widths = []
+        for i, col in enumerate(df.columns):
+            # header width
+            w = len(str(col)) + 2
+            # sample first 500 rows to keep it quick
+            sample = df[col].astype(str).head(500)
+            if not sample.empty:
+                w = max(w, sample.map(lambda s: len(s)).max() + 1)
+            widths.append(min(w, 60))  # cap
+        for idx, w in enumerate(widths):
+            ws.set_column(idx, idx, w)
+    except Exception:
+        # Best-effort only
+        pass
 
 def read_rows(path: str, sheet: Optional[str] = None) -> List[dict]:
     p = Path(path); suffix = p.suffix.lower()
@@ -55,7 +86,9 @@ def write_rows(path: str, rows: List[dict], fieldnames: List[str]) -> None:
         try:
             with pd.ExcelWriter(p, engine="xlsxwriter") as writer:
                 frame.to_excel(writer, index=False, sheet_name="Results")
+                _autosize_and_style_excel(writer, frame, "Results")
         except Exception:
+            # fallback without styling
             frame.to_excel(p, index=False, sheet_name="Results")
         return
     with open(p, "w", newline="", encoding="utf-8") as f:
@@ -185,23 +218,8 @@ def _azure_price_key(sku_core: str, os_name: str) -> str:
 def _azure_fetch_retail_prices(region: str, sku_core: str, os_name: str, timeout_s: float = 15.0) -> Optional[float]:
     """
     Call Azure Retail Prices API to get On-Demand hourly price for a VM SKU in a given region.
-    We prioritize:
-      - serviceName: 'Virtual Machines'
-      - armRegionName: exact region (e.g., 'eastus')
-      - skuName: exact sku_core (e.g., 'D4s v5')
-      - priceType: 'Consumption'
-      - unitOfMeasure: '1 Hour'
-      - NOT spot/low priority, NOT reservation
-      - OS:
-          Linux  -> prefer entries that are Linux or not explicitly Windows
-          Windows-> prefer entries marked Windows
-    Returns USD hourly price or None.
     """
-    # Base endpoint
     base = "https://prices.azure.com/api/retail/prices"
-
-    # Filters: priceType Consumption, armRegionName, skuName, serviceName Virtual Machines
-    # API filter syntax uses OData; escape single quotes
     arm = region.replace("'", "''")
     sku = sku_core.replace("'", "''")
     filt = (
@@ -210,12 +228,9 @@ def _azure_fetch_retail_prices(region: str, sku_core: str, os_name: str, timeout
         f"skuName eq '{sku}' and "
         f"priceType eq 'Consumption'"
     )
-
     url = f"{base}?$filter={requests.utils.quote(filt, safe=' =\'')}"
-    # pagination
     best_linux = None
     best_windows = None
-
     while url:
         resp = requests.get(url, timeout=timeout_s)
         if resp.status_code != 200:
@@ -223,7 +238,6 @@ def _azure_fetch_retail_prices(region: str, sku_core: str, os_name: str, timeout
         data = resp.json()
         items = data.get("Items", []) or data.get("items", [])
         for it in items:
-            # Exclude reservation/spot
             if str(it.get("type","")).lower() != "consumption":
                 continue
             if "spot" in str(it.get("meterName","")).lower() or "low priority" in str(it.get("meterName","")).lower():
@@ -234,20 +248,15 @@ def _azure_fetch_retail_prices(region: str, sku_core: str, os_name: str, timeout
             currency = it.get("currencyCode", "USD")
             if price is None or currency != "USD":
                 continue
-
             pname = str(it.get("productName","")).lower()
             mname = str(it.get("meterName","")).lower()
-            # crude OS detection
             is_windows = ("windows" in pname) or ("windows" in mname)
             is_linux = ("linux" in pname) or ("linux" in mname) or (not is_windows)
-
             if is_windows:
                 best_windows = float(price) if best_windows is None else min(best_windows, float(price))
             elif is_linux:
                 best_linux = float(price) if best_linux is None else min(best_linux, float(price))
-
         url = data.get("NextPageLink") or data.get("nextPageLink")
-
     if os_name.strip().lower() == "windows":
         return best_windows if best_windows is not None else best_linux
     else:
@@ -257,7 +266,6 @@ def _azure_live_compute_hourly(region: str, sku: str, os_name: str, refresh: boo
     region = region.strip().lower()
     sku_core = _normalize_azure_sku(sku)
     key = _azure_price_key(sku_core, os_name)
-
     cache_path = _azure_cache_path(region)
     cache_ok = (not refresh) and (ttl_days is None or _cache_age_days(cache_path) <= float(ttl_days))
     cache = _azure_cache_load(region) if cache_ok else {}
@@ -266,14 +274,12 @@ def _azure_live_compute_hourly(region: str, sku: str, os_name: str, refresh: boo
         val = hit.get("price")
         if isinstance(val, (int, float)):
             return float(val)
-
     price = _azure_fetch_retail_prices(region, sku_core, os_name)
     if price is None:
         return None
     cache[key] = {"price": float(price), "ts": int(time.time())}
     _azure_cache_save(region, cache)
     return float(price)
-
 
 def _azure_price_override(region: str, sku: str, os_name: str, license_model: str) -> Optional[float]:
     p = Path("prices/azure_compute_prices.json")
@@ -302,20 +308,15 @@ def azure_vm_price_hourly(region: str, sku: str, os_name: str, license_model: st
     live = _azure_live_compute_hourly(region, sku, os_name, refresh=refresh, ttl_days=ttl_days)
     if live is not None:
         return live
-    ...
-
-
     # 1) User override JSON
     o = _azure_price_override(region, sku, os_name, license_model)
     if o is not None:
         return o
-
     # 2) Heuristic fallback (base + OS uplift)
     uplift = _AZ_OS_UPLIFT.get(os_name.strip().lower(), 0.0)
     if str(license_model).strip().lower() != "byol":
         uplift += 0.01
     return _AZ_BASE_DEFAULT_HOURLY + uplift
-
 
 # ---------- Monthly calculators ----------
 def monthly_compute_cost(price_per_hour: Optional[float], hours: float) -> float:
