@@ -1,0 +1,2 @@
+cloud,region,recommended_instance_type,os,license_model,ebs_gb,ebs_type,s3_gb,network_profile
+azure,eastus,Standard_D2s_v5,Linux,BYOL,100,gp3,50,low

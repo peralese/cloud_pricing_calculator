@@ -365,27 +365,6 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
     if rec_out.suffix.lower() in {".xlsx", ".xls"}:
         with pd.ExcelWriter(rec_out, engine="xlsxwriter") as writer:
             out_df.to_excel(writer, index=False, sheet_name="Results")
-            # Light polish for Excel outputs
-            try:
-                # Reuse autosize/filter logic from pricing.write_rows style
-                from pricing import _autosize_and_style_excel  # type: ignore
-                _autosize_and_style_excel(writer, out_df, "Results")
-            except Exception:
-                pass
-            # Add a Summary sheet right away (recommend-only summary)
-            try:
-                # Build a tiny summary similar to summary.py
-                rec_rows = len(out_df)
-                avg_vcpu = float(pd.to_numeric(out_df.get("requested_vcpu", pd.Series(dtype=float)), errors="coerce").mean())
-                avg_mem = float(pd.to_numeric(out_df.get("requested_memory_gib", pd.Series(dtype=float)), errors="coerce").mean())
-                kv = [
-                    {"Metric": "recommend_rows", "Value": rec_rows},
-                    {"Metric": "avg_requested_vcpu", "Value": round(avg_vcpu, 2) if avg_vcpu == avg_vcpu else ""},
-                    {"Metric": "avg_requested_memory_gib", "Value": round(avg_mem, 2) if avg_mem == avg_mem else ""},
-                ]
-                pd.DataFrame(kv).to_excel(writer, index=False, sheet_name="Summary")
-            except Exception:
-                pass
     else:
         out_df.to_csv(rec_out, index=False)
 
@@ -396,6 +375,7 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
         try:
             run_dir = Path(rec_out).parent
             write_run_summary(run_dir, rec_out, None)
+            # write_run_summary(Path(rec_out).parent, rec_out, None)
         except Exception as e:
             click.echo(f"⚠️ Summary generation failed: {e}", err=True)
 
@@ -412,10 +392,10 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
 @click.option("--hours-per-month", type=float, default=730.0, show_default=True)
 @click.option("--no-monthly", is_flag=True, help="Write only price_per_hour, skip monthly breakdown.")
 @click.option("--refresh-azure-prices", is_flag=True, help="Refresh Azure Retail Prices cache before pricing (if supported).")
-@click.option("--azure-cache-ttl", type=float, default=7.0, show_default=True,
-              help="Days to keep Azure retail price cache before refresh. Ignored if --refresh-azure-prices is set.")
+@click.option("--azure-cache-ttl-days", type=float, default=7.0, show_default=True,
+              help="Auto-refresh Azure price cache if older than this many days.")
 @click.option("--output", "output_path", default=None, help="Output file path (CSV/Excel).")
-def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_monthly, refresh_azure_prices, azure_cache_ttl, output_path):
+def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_monthly, refresh_azure_prices, azure_cache_ttl_days, output_path):
     """
     Price the recommendation output. Enforces single-cloud file matching the --cloud argument.
     """
@@ -477,7 +457,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                     raise SystemExit("❌ Azure pricing function not available: pricing.azure_vm_price_hourly")
                 compute_price = azure_vm_price_hourly(
                     region_row, itype, os_for_compute, license_model,
-                    refresh=refresh_azure_prices, ttl_days=None if refresh_azure_prices else float(azure_cache_ttl)
+                    refresh=refresh_azure_prices, ttl_days=azure_cache_ttl_days
                 )
                 r["pricing_note"] = r.get("pricing_note", "")
             else:
@@ -551,12 +531,10 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         try:
             run_dir = Path(out_path).parent
             write_run_summary(run_dir, None, out_path)
+            # write_run_summary(Path(out_path).parent, None, out_path)
         except Exception as e:
             print(f"⚠️ Summary generation failed: {e}")
 
 # ---------------------- entry ----------------------
 if __name__ == "__main__":
     cli()
-
-
-
