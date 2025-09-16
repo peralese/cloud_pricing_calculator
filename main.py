@@ -392,10 +392,8 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
 @click.option("--hours-per-month", type=float, default=730.0, show_default=True)
 @click.option("--no-monthly", is_flag=True, help="Write only price_per_hour, skip monthly breakdown.")
 @click.option("--refresh-azure-prices", is_flag=True, help="Refresh Azure Retail Prices cache before pricing (if supported).")
-@click.option("--azure-cache-ttl-days", type=float, default=7.0, show_default=True,
-              help="Auto-refresh Azure price cache if older than this many days.")
 @click.option("--output", "output_path", default=None, help="Output file path (CSV/Excel).")
-def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_monthly, refresh_azure_prices, azure_cache_ttl_days, output_path):
+def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_monthly, refresh_azure_prices, output_path):
     """
     Price the recommendation output. Enforces single-cloud file matching the --cloud argument.
     """
@@ -456,8 +454,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 if azure_vm_price_hourly is None:
                     raise SystemExit("❌ Azure pricing function not available: pricing.azure_vm_price_hourly")
                 compute_price = azure_vm_price_hourly(
-                    region_row, itype, os_for_compute, license_model,
-                    refresh=refresh_azure_prices, ttl_days=azure_cache_ttl_days
+                    region_row, itype, os_for_compute, license_model, refresh=refresh_azure_prices
                 )
                 r["pricing_note"] = r.get("pricing_note", "")
             else:
@@ -527,6 +524,13 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     write_rows(str(out_path), out_rows, fieldnames)
     print(f"Wrote priced recommendations → {out_path}")
 
+    # Create Excel workbook with 'All' + per-environment tabs + optional Summary
+    try:
+        df_all = pd.DataFrame(out_rows)
+        _write_pricing_excel_workbook(out_path, df_all)
+    except Exception as e:
+        print(f"⚠️ Excel workbook generation skipped: {e}")
+
     if write_run_summary:
         try:
             run_dir = Path(out_path).parent
@@ -534,6 +538,81 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
             # write_run_summary(Path(out_path).parent, None, out_path)
         except Exception as e:
             print(f"⚠️ Summary generation failed: {e}")
+
+# ---------------------- Excel output helpers ----------------------
+def _sanitize_sheet_name(name: str) -> str:
+    bad = '[]:*?/\\'
+    s = str(name or "").strip() or "Unspecified"
+    for ch in bad:
+        s = s.replace(ch, "-")
+    if len(s) > 31:
+        s = s[:31]
+    if s.startswith("'") or s.endswith("'"):
+        s = s.strip("'")
+    return s or "Unspecified"
+
+def _autosize_and_style(writer, df, sheet_name: str):
+    ws = writer.sheets[sheet_name]
+    try:
+        bold = writer.book.add_format({"bold": True})
+        ws.set_row(0, None, bold)
+    except Exception:
+        pass
+    try:
+        ws.freeze_panes(1, 0)
+    except Exception:
+        pass
+    for idx, col in enumerate(df.columns):
+        try:
+            max_len = max(len(str(col)), *(len(str(x)) for x in df[col].astype(str).tolist()))
+            ws.set_column(idx, idx, min(max_len + 2, 60))
+        except Exception:
+            continue
+
+def _detect_environment_column(df) -> str | None:
+    for c in df.columns:
+        if str(c).strip().lower() in {"environment", "env"}:
+            return c
+    return None
+
+def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df):
+    out_xlsx = price_csv_path.with_suffix(".xlsx")
+    run_dir = price_csv_path.parent
+    summary_csv = run_dir / "summary.csv"
+
+    env_col = _detect_environment_column(all_rows_df)
+    if env_col:
+        env_series = all_rows_df[env_col].fillna("Unspecified").astype(str)
+    else:
+        env_series = None
+
+    with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+        all_rows_df.to_excel(writer, index=False, sheet_name="All")
+        _autosize_and_style(writer, all_rows_df, "All")
+
+        if env_series is not None:
+            for env_value in sorted(set(env_series)):
+                sub = all_rows_df[env_series == env_value]
+                sheet = _sanitize_sheet_name(env_value)
+                used = set(k for k in writer.sheets.keys())
+                if sheet in used:
+                    base = sheet
+                    i = 2
+                    while sheet in used and i < 100:
+                        suffix = f"_{i}"
+                        sheet = (base[:31-len(suffix)] + suffix)[:31]
+                        i += 1
+                sub.to_excel(writer, index=False, sheet_name=sheet)
+                _autosize_and_style(writer, sub, sheet)
+
+        if summary_csv.exists():
+            try:
+                df_summary = pd.read_csv(summary_csv)
+                df_summary.to_excel(writer, index=False, sheet_name="Summary")
+                _autosize_and_style(writer, df_summary, "Summary")
+            except Exception:
+                pass
+    print(f"Wrote Excel workbook with environment tabs → {out_xlsx}")
 
 # ---------------------- entry ----------------------
 if __name__ == "__main__":

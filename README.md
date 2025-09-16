@@ -18,7 +18,7 @@ All outputs now land in **date/time‑stamped run folders** under `./output/`.
 - Validator: Tier‑A (cloud/region + vCPU or memory > 0), Tier‑B (os/purchase_option/root_gb/root_type).
 - Robust NaN/null handling; numeric sanity; region checks with “did‑you‑mean” hints.
 - Azure region normalization (aliases → canonical).
-- Azure pricing cache: `prices/azure_compute_cache_<region>.json`; auto-refresh with `--azure-cache-ttl-days` (default 7); `--refresh-azure-prices` forces refresh.
+- Azure pricing cache: `prices/azure_compute_cache_<region>.json`; `--refresh-azure-prices` bypasses cache.
 
 ---
 
@@ -36,7 +36,7 @@ az login && az account set --subscription "<sub>"  # or use Azure CLI
 
 ```bash
 python main.py recommend --cloud {aws|azure} --in <file.csv|.xlsx> [--region <slug>] [--strict] [--output <file>]
-python main.py price      --cloud {aws|azure} (--latest | --in <recommend.csv|.xlsx>)                           [--region <slug>] [--output <file>] [--hours-per-month N]                           [--refresh-azure-prices] [--azure-cache-ttl-days N] [--no-monthly]
+python main.py price      --cloud {aws|azure} (--latest | --in <recommend.csv|.xlsx>)                           [--region <slug>] [--output <file>] [--hours-per-month N]                           [--refresh-azure-prices] [--no-monthly]
 ```
 
 Helpers:
@@ -102,6 +102,25 @@ db_engine, db_instance_class, multi_az
 
 ---
 
+### Environments
+
+If your input includes an `environment` (or `env`) column (e.g., `Production`, `Development`, `Test`, `QA`),
+the **price** command will additionally create an Excel workbook with:
+
+- **All** — every priced row
+- **One sheet per environment** — filtered rows for each environment value
+- **Summary** — run totals (if `summary.csv` exists)
+
+**How to produce the workbook:** simply run `price` as usual; the app writes CSV **and** a companion XLSX next to it:
+```bash
+python main.py price --cloud azure --in samples/recommend_azure_with_env.csv
+# writes output/.../price.csv and output/.../price.xlsx (All + per-environment tabs)
+```
+
+**Notes**
+- Sheet names are sanitized for Excel (max 31 chars, invalid characters replaced).
+- If there is no environment column, only **All** (and **Summary**, if present) will be written.
+
 ## Roadmap
 
 - Azure price cache TTL (auto‑refresh stale)
@@ -123,3 +142,4 @@ MIT
 
 **Erick Perales** — IT Architect | Cloud Migration Specialist
 https://github.com/peralese
+
