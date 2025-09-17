@@ -488,7 +488,29 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 db_class = (r.get("db_instance_class") or "").strip()
                 db_multi_az = as_bool(r.get("multi_az"), False)
                 if db_engine and db_class and region_row:
-                    db_monthly = monthly_rds_cost(db_engine, db_class, region_row, license_model, db_multi_az, hours)
+                    # ---- Normalize engine for AWS Pricing API ----
+                    _eng_map = {
+                        "mysql": "MySQL",
+                        "mariadb": "MariaDB",
+                        "postgres": "PostgreSQL",
+                        "postgresql": "PostgreSQL",
+                        "oracle": "Oracle",
+                        "sqlserver": "SQL Server",
+                        "sql server": "SQL Server",
+                    }
+                    eng_key = db_engine.strip().lower()
+                    db_engine_norm = _eng_map.get(eng_key, db_engine)
+
+                    # ---- License handling by engine ----
+                    lm_in = (r.get("license_model") or "").strip()
+                    # Default to License included for engines that don't support BYOL on RDS
+                    if db_engine_norm in {"MySQL", "PostgreSQL", "MariaDB", "SQL Server"}:
+                        license_model = "AWS"  # our code maps this to "License included"
+                        if eng_key == "sqlserver" and lm_in.lower() == "byol":
+                            r["pricing_note"] = (r.get("pricing_note","") + " | RDS SQL forces License-Included").strip(" |")
+                    # Oracle keeps whatever user provided (BYOL or LI)
+                    # db_monthly = monthly_rds_cost(db_engine, db_class, region_row, license_model, db_multi_az, hours)
+                    db_monthly = monthly_rds_cost(db_engine_norm, db_class, region_row, license_model, db_multi_az, hours)
                 else:
                     db_monthly = 0.0
             else:

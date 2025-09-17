@@ -1,0 +1,8 @@
+id,cloud,region,vcpu,memory_gib,profile,os,purchase_option,,root_gb,root_type,license_model,ebs_gb,ebs_type,s3_gb,network_profile,db_engine,db_instance_class,db_storage_gb,multi_az,license_model,environment
+dbserver1,aws,us-east-1,2,32,balanced,linux,ondemand,,128,gp3,BYOL,250,gp3,0,medium,mysql,db.m5.large,500,FALSE,AWS,Test
+dbserver2,aws,us-east-1,2,32,balanced,linux,ondemand,,128,gp3,BYOL,250,gp3,0,medium,postgresql,db.m5.large,500,FALSE,AWS,Production
+dbserver3,aws,us-east-1,2,32,balanced,linux,ondemand,,128,gp3,BYOL,250,gp3,0,medium,mariadb,db.m5.large,500,FALSE,AWS,Production
+dbserver4,aws,us-east-1,2,32,balanced,linux,ondemand,,128,gp3,BYOL,250,gp3,0,medium,oracle,db.m5.large,500,FALSE,BYOL,Development
+dbserver5,aws,us-east-1,2,32,balanced,linux,ondemand,,128,gp3,BYOL,250,gp3,0,medium,oracle,db.m5.large,500,FALSE,AWS,Test
+dbserver6,aws,us-east-1,2,32,balanced,linux,ondemand,,128,gp3,BYOL,250,gp3,0,medium,sqlserver,db.m5.large,500,FALSE,BYOL,Development
+dbserver7,aws,us-east-1,2,32,balanced,linux,ondemand,,128,gp3,BYOL,250,gp3,0,medium,sqlserver,db.m5.large,500,FALSE,AWS,Production
