@@ -1,5 +1,0 @@
-id,cloud,region,vcpu,memory_gib,os,purchase_option,root_gb,root_type,profile
-az-ok-1,azure,eastus,4,16,linux,ondemand,64,PremiumSSD,balanced
-az-rec-1,azure,eastus,2,8,linux,ondemand,64,,compute
-az-err-1,azure,eastus,,,,,,balanced
-
