@@ -1,8 +1,8 @@
 # Byte-compiled / optimized / DLL files
 
 **pycache**/
-\*.py\[cod]
-\*\$py.class
+*.py\[cod]
+*\$py.class
 
 # Virtual environments
 
@@ -24,14 +24,14 @@ lib64/
 parts/
 sdist/
 var/
-\*.egg-info/
+*.egg-info/
 .installed.cfg
-\*.egg
+*.egg
 
 # PyInstaller
 
-\*.manifest
-\*.spec
+*.manifest
+*.spec
 
 # Installer logs
 
@@ -48,8 +48,8 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
-\*.cover
-\*.py,cover
+*.cover
+*.py,cover
 .hypothesis/
 .pytest\_cache/
 
@@ -61,8 +61,8 @@ coverage.xml
 
 .vscode/
 .idea/
-\*.swp
-\*.swo
+*.swp
+*.swo
 
 # dotenv environment variables
 
@@ -71,8 +71,8 @@ coverage.xml
 # Local data / outputs
 
 output/
-\*.csv
-\*.xlsx
+*.csv
+*.xlsx
 
 # Mac/Windows system files
 
