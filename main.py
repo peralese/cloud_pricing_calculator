@@ -440,7 +440,8 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         itype = r.get("recommended_instance_type") or r.get("instance_type") or ""
         region_row = (r.get("region") or region or ("eastus" if row_cloud == "azure" else None))
         os_row = (r.get("os") or os_name or "Linux").strip()
-        license_model = (r.get("license_model") or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
+        lm1 = r.get("license_model")
+        license_model = (r.get("license_model.1") or lm1 or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
 
         # BYOL → treat compute as Linux price component
         os_for_compute = "Linux" if license_model.lower() == "byol" else os_row
@@ -529,9 +530,9 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                         v_raw = r.get("db_vcores")
                         vcores = int(v_raw) if str(v_raw).strip().lower() not in {"", "none", "null"} else 8
                         storage_gb = as_float(r.get("db_storage_gb"), 128.0)
-                        # Azure: BYOL => AHUB; anything else => LicenseIncluded
-                        lm = (r.get("license_model") or "").strip().lower()
-                        license_model_az = "AHUB" if lm == "byol" else "LicenseIncluded"
+                        # Azure: use the already-normalized license_model from above in this loop
+                        lm = (license_model or "").strip().lower()
+                        license_model_az = "AHUB" if lm in {"byol", "ahub", "azure hybrid benefit", "hybrid"} else "LicenseIncluded"
                         db_monthly = monthly_azure_sql_cost(
                             deployment=deployment,
                             region=str(region_row or "eastus"),
@@ -542,8 +543,16 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                             license_model=license_model_az,
                             hours=float(hours),
                         )
+                       # Debug: show pure heuristic LI vs AHUB (ignore overrides for clarity)
+                        li_monthly  = monthly_azure_sql_cost(deployment, str(region_row or "eastus"), tier, family,
+                                               float(vcores), storage_gb, "LicenseIncluded", float(hours),
+                                               use_overrides=False)
+
+                        ahub_monthly = monthly_azure_sql_cost(deployment, str(region_row or "eastus"), tier, family, float(vcores), storage_gb, "AHUB", float(hours),use_overrides=False)
                         r["pricing_note"] = (r.get("pricing_note","") +
-                                             f" | Azure SQL {deployment} {tier} {vcores} vC, {storage_gb} GB, {license_model_az}").strip(" |")
+                        f" | Azure SQL {deployment} {tier} {vcores} vC, {storage_gb} GB, "
+                        f"effective_license={license_model_az} li=${li_monthly:.2f} ahub=${ahub_monthly:.2f}").strip(" |")
+
                 except Exception as e:
                     r["pricing_note"] = (r.get("pricing_note","") + f" | DB pricing skipped: {e}").strip(" |")
             else:

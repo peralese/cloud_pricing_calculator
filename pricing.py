@@ -188,6 +188,13 @@ def price_rds_ondemand(engine: str, instance_class: str, region: str, license_mo
 # --- Add anywhere below your JSON helpers (e.g., near other monthly_* fns) ---
 from pathlib import Path
 
+def _load_override_json(path: Path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
 def monthly_azure_sql_cost(
     deployment: str,           # "single" | "mi"
     region: str,
@@ -197,7 +204,9 @@ def monthly_azure_sql_cost(
     storage_gb: float,
     license_model: str,        # "AHUB" | "LicenseIncluded"
     hours: float,
+    use_overrides: bool = True,
 ) -> float:
+
     """
     1) Try prices/azure_sql_prices.json override (recommended for accuracy).
        Match on deployment, region, tier, family (optional), vcores, license_model.
@@ -205,35 +214,40 @@ def monthly_azure_sql_cost(
        hourly = vcores * base_vcore_rate * tier_multiplier * (AHUB discount if applicable)
        monthly = hourly * hours + storage_gb * AZSQL_STORAGE_GB_MONTH
     """
-    overrides = _load_override_json(Path("prices/azure_sql_prices.json")) or []
-    lic = (license_model or "LicenseIncluded").strip().upper()
     dep = (deployment or "single").strip().lower()
+    reg = (region or "eastus").strip().lower()
     tier_norm = (tier or "GeneralPurpose").strip()
     fam = (family or "").strip()
+    lic = (license_model or "LicenseIncluded").strip().upper()
 
-    for r in overrides:
-        if (str(r.get("deployment","")).lower() == dep and
-            str(r.get("region","")).lower() == str(region).strip().lower() and
-            str(r.get("tier","")) == tier_norm and
-            str(r.get("license_model","LicenseIncluded")).upper() == lic and
-            float(r.get("vcores", vcores)) == float(vcores) and
-            str(r.get("family","")).strip() == fam):
-            price_hour = float(r.get("hourly", 0.0))
-            storage_rate = float(r.get("storage_gb_month", AZSQL_STORAGE_GB_MONTH))
-            return round(price_hour * float(hours) + max(0.0, float(storage_gb)) * storage_rate, 2)
+    # --- 1) Overrides (optional) ---
+    overrides = _load_override_json(Path("prices/azure_sql_prices.json")) or []
+    if use_overrides and overrides:
+        for r in overrides:
+            if (str(r.get("deployment","")).lower() == dep and
+                str(r.get("region","")).strip().lower() == reg and
+                str(r.get("tier","")) == tier_norm and
+                str(r.get("license_model","LicenseIncluded")).strip().upper() == lic and
+                float(r.get("vcores", vcores)) == float(vcores) and
+                str(r.get("family","")).strip() == fam):
+                hourly = float(r.get("hourly", 0.0))
+                storage_rate = float(r.get("storage_gb_month", AZSQL_STORAGE_GB_MONTH))
+                return round(hourly * float(hours) + max(0.0, float(storage_gb)) * storage_rate, 2)
 
+    # --- 2) Heuristic path ---
     base = AZSQL_MI_VCORE_HOURLY_GP if dep == "mi" else AZSQL_DB_VCORE_HOURLY_GP
     mult = 1.0
-    if tier_norm.lower() in {"businesscritical", "business_critical", "bc"}:
+    lt = tier_norm.replace("_", "").lower()
+    if lt in {"businesscritical", "bc"}:
         mult = AZSQL_BC_MULTIPLIER
-    elif tier_norm.lower() in {"hyperscale", "hs"}:
+    elif lt in {"hyperscale", "hs"}:
         mult = AZSQL_HS_MULTIPLIER
 
-    hourly = float(vcores) * base * mult
+    compute_hourly = float(vcores) * base * mult
     if lic == "AHUB":
-        hourly *= (1.0 - AZSQL_AHUB_DISCOUNT)
+        compute_hourly *= (1.0 - AZSQL_AHUB_DISCOUNT)
 
-    monthly = hourly * float(hours) + max(0.0, float(storage_gb)) * AZSQL_STORAGE_GB_MONTH
+    monthly = compute_hourly * float(hours) + max(0.0, float(storage_gb)) * AZSQL_STORAGE_GB_MONTH
     return round(monthly, 2)
 
 def _load_override_json(path: Path):
