@@ -513,9 +513,41 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                     db_monthly = monthly_rds_cost(db_engine_norm, db_class, region_row, license_model, db_multi_az, hours)
                 else:
                     db_monthly = 0.0
+            elif row_cloud == "azure":
+                # ---------- Azure SQL DB / Managed Instance (SQL Server only) ----------
+                db_monthly = 0.0
+                try:
+                    db_engine = (r.get("db_engine") or "").strip().lower()
+                    if db_engine in {"sqlserver", "sql server"}:
+                        from pricing import monthly_azure_sql_cost
+                        deployment = (r.get("db_deployment") or "single").strip().lower()   # "single" or "mi"
+                        if deployment not in {"single", "mi"}:
+                            deployment = "single"
+                        tier = (r.get("db_tier") or "GeneralPurpose").strip()
+                        family = (r.get("db_family") or "").strip() or None
+                        # Default vCores/storage if omitted
+                        v_raw = r.get("db_vcores")
+                        vcores = int(v_raw) if str(v_raw).strip().lower() not in {"", "none", "null"} else 8
+                        storage_gb = as_float(r.get("db_storage_gb"), 128.0)
+                        # Azure: BYOL => AHUB; anything else => LicenseIncluded
+                        lm = (r.get("license_model") or "").strip().lower()
+                        license_model_az = "AHUB" if lm == "byol" else "LicenseIncluded"
+                        db_monthly = monthly_azure_sql_cost(
+                            deployment=deployment,
+                            region=str(region_row or "eastus"),
+                            tier=tier,
+                            family=family,
+                            vcores=float(vcores),
+                            storage_gb=storage_gb,
+                            license_model=license_model_az,
+                            hours=float(hours),
+                        )
+                        r["pricing_note"] = (r.get("pricing_note","") +
+                                             f" | Azure SQL {deployment} {tier} {vcores} vC, {storage_gb} GB, {license_model_az}").strip(" |")
+                except Exception as e:
+                    r["pricing_note"] = (r.get("pricing_note","") + f" | DB pricing skipped: {e}").strip(" |")
             else:
                 db_monthly = 0.0
-
             r["monthly_db_usd"] = f"{db_monthly:.2f}"
             parts = [
                 as_float(r["monthly_compute_usd"]),

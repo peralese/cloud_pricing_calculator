@@ -18,5 +18,9 @@
   "B4as v2|azure linux (cbl-mariner)": {
     "price": 0.15,
     "ts": 1757563557
+  },
+  "FX2mds v2|linux": {
+    "price": 0.274,
+    "ts": 1758149624
   }
 }
