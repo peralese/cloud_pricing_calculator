@@ -127,6 +127,9 @@ AWS_REGION_TO_LOCATION = {
     "ap-east-1": "Asia Pacific (Hong Kong)", "sa-east-1": "South America (Sao Paulo)",
     "me-south-1": "Middle East (Bahrain)", "me-central-1": "Middle East (UAE)",
     "af-south-1": "Africa (Cape Town)",
+    # ✅ GovCloud regions
+    "us-gov-west-1": "AWS GovCloud (US-West)",
+    "us-gov-east-1": "AWS GovCloud (US-East)",
 }
 
 def _pricing_first_usd(pl_obj: dict) -> Optional[float]:
@@ -141,6 +144,8 @@ def _pricing_first_usd(pl_obj: dict) -> Optional[float]:
 
 def price_ec2_ondemand(instance_type: str, region: str, os_name: str = "Linux") -> Optional[float]:
     boto3 = _lazy_boto3()
+    # ✅ normalize region (handles aliases like "aws govcloud us-west")
+    region = normalize_region(region)
     location = AWS_REGION_TO_LOCATION.get(region)
     if not location: return None
     pricing = boto3.client("pricing", region_name="us-east-1")
@@ -159,8 +164,67 @@ def price_ec2_ondemand(instance_type: str, region: str, os_name: str = "Linux") 
         if usd is not None: return usd
     return None
 
+def _canon_rds_engine(engine: str) -> str:
+    """
++    Map common CSV-friendly tokens to AWS Price List canonical databaseEngine names.
++    """
+    m = {
+        "postgres": "PostgreSQL",
+        "postgresql": "PostgreSQL",
+        "aurora-postgres": "Aurora PostgreSQL",
+        "aurora-postgresql": "Aurora PostgreSQL",
+        "aurora-mysql": "Aurora MySQL",
+        "mysql": "MySQL",
+        "mariadb": "MariaDB",
+        "oracle": "Oracle",
+        "sqlserver": "SQL Server",
+        "sql server": "SQL Server",
+    }
+    e = (engine or "").strip().lower()
+    return m.get(e, engine)  # fall back to given value if already canonical
+
+# --------------------------------------------------------------------
+# Helpers for GovCloud awareness (no refactor required elsewhere)
+# --------------------------------------------------------------------
+def is_govcloud(region: str) -> bool:
+    """Return True if region is in the AWS GovCloud partition."""
+    return str(region).lower().startswith("us-gov-")
+
+def aws_partition_for_region(region: str) -> str:
+    """
+    Returns the AWS partition id for the region.
+    Useful if you ever need to branch (e.g., Savings Plans/RI logic).
+    """
+    return "aws-us-gov" if is_govcloud(region) else "aws"
+
+# (Optional) accept a few human-ish aliases and normalize to canonical codes.
+_REGION_ALIAS = {
+    "aws govcloud us-west": "us-gov-west-1",
+    "aws-gov-west": "us-gov-west-1",
+    "govcloud-us-west": "us-gov-west-1",
+    "gov-west-1": "us-gov-west-1",
+    "aws govcloud us-east": "us-gov-east-1",
+    "aws-gov-east": "us-gov-east-1",
+    "govcloud-us-east": "us-gov-east-1",
+    "gov-east-1": "us-gov-east-1",
+}
+
+def normalize_region(region: str) -> str:
+    r = (region or "").strip().lower()
+    if r in AWS_REGION_TO_LOCATION:
+        return r
+    if r in _REGION_ALIAS:
+        return _REGION_ALIAS[r]
+    # legacy transforms like 'govcloud-us-west-1' -> 'us-gov-west-1'
+    r2 = r.replace("govcloud-us", "us-gov")
+    if r2 in AWS_REGION_TO_LOCATION:
+        return r2
+    return r  # fall through (let existing validators handle errors)
+
 def price_rds_ondemand(engine: str, instance_class: str, region: str, license_model: str = "AWS", multi_az: bool = False) -> Optional[float]:
     boto3 = _lazy_boto3()
+    # ✅ normalize region and engine
+    region = normalize_region(region)
     location = AWS_REGION_TO_LOCATION.get(region)
     if not location: return None
     lm = "License included" if (str(license_model).strip().lower() != "byol") else "Bring your own license"
@@ -168,7 +232,7 @@ def price_rds_ondemand(engine: str, instance_class: str, region: str, license_mo
     pricing = boto3.client("pricing", region_name="us-east-1")
     filters = [
         {"Type":"TERM_MATCH","Field":"location","Value":location},
-        {"Type":"TERM_MATCH","Field":"databaseEngine","Value":engine},
+        {"Type":"TERM_MATCH","Field":"databaseEngine","Value":_canon_rds_engine(engine)},
         {"Type":"TERM_MATCH","Field":"instanceType","Value":instance_class},
         {"Type":"TERM_MATCH","Field":"deploymentOption","Value":dep},
         {"Type":"TERM_MATCH","Field":"licenseModel","Value":lm},

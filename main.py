@@ -566,6 +566,8 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 as_float(r["monthly_db_usd"]),
             ]
             r["monthly_total_usd"] = f"{sum(parts):.2f}"
+            mt = float(r.get("monthly_total_usd") or 0.0)
+            r["annual_total_usd"] = round(mt * 12.0, 2)
 
         r["provider"] = row_cloud
         out_rows.append(r)

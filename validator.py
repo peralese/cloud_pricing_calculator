@@ -1,6 +1,7 @@
 # validator.py
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
+import re
 
 # --- Canonical region sets (keep these reasonably up-to-date) ---
 
@@ -15,6 +16,15 @@ AWS_REGIONS = {
     "af-south-1",
     "me-south-1","me-central-1"
 }
+
+# ✅ AWS GovCloud regions
+AWS_GOV_REGIONS = {
+    "us-gov-west-1",
+    "us-gov-east-1",
+}
+
+# Union of commercial + GovCloud (used by normalization & membership checks)
+ALL_AWS_REGIONS = AWS_REGIONS | AWS_GOV_REGIONS
 
 # Azure canonical slugs (match what your recommender supports)
 AZURE_REGIONS = {
@@ -115,6 +125,31 @@ def _closest_choices(token: str, choices: List[str], n: int = 5) -> List[str]:
         return difflib.get_close_matches(token, choices, n=n, cutoff=0.0)
     except Exception:
         return choices[:n]
+    
+# ---- AWS region normalization (GovCloud-aware) ----
+_AWS_REGION_ALIASES: Dict[str, str] = {
+    "aws govcloud us-west": "us-gov-west-1",
+    "aws-gov-west": "us-gov-west-1",
+    "govcloud-us-west": "us-gov-west-1",
+    "gov-west-1": "us-gov-west-1",
+    "aws govcloud us-east": "us-gov-east-1",
+    "aws-gov-east": "us-gov-east-1",
+    "govcloud-us-east": "us-gov-east-1",
+    "gov-east-1": "us-gov-east-1",
+}
+
+def _normalize_aws_region(r: str) -> str:
+    """
+    Normalize human-ish AWS region inputs to canonical codes.
+    Returns the input lowercased if no mapping found.
+    """
+    k = str(r or "").strip().lower()
+    if k in ALL_AWS_REGIONS:
+        return k
+    if k in _AWS_REGION_ALIASES:
+        return _AWS_REGION_ALIASES[k]
+    k2 = k.replace("govcloud-us", "us-gov")  # 'govcloud-us-west-1' -> 'us-gov-west-1'
+    return k2
 
 def _validate_region_for_cloud(cloud: Optional[str], region_raw: Optional[str]) -> List[Issue]:
     issues: List[Issue] = []
@@ -150,14 +185,23 @@ def _validate_region_for_cloud(cloud: Optional[str], region_raw: Optional[str]) 
             ))
 
     elif c == "aws":
-        # require exact AWS code like 'us-east-1'
-        if r_l not in AWS_REGIONS:
-            suggestions = ", ".join(_closest_choices(r_l, sorted(AWS_REGIONS)))
+        # GovCloud-aware normalization (accept aliases, warn if normalized)
+        norm = _normalize_aws_region(r_l)
+        if norm in ALL_AWS_REGIONS:
+            if norm != r_l:
+                issues.append(Issue(
+                    "warn", "region",
+                    f"normalized '{region_raw}' to '{norm}'",
+                    "Prefer canonical AWS codes (e.g., us-gov-west-1, us-east-1)."
+                ))
+        else:
+            choices = sorted(list(ALL_AWS_REGIONS))
+            suggestions = ", ".join(_closest_choices(r_l, choices))
             # helpful hint if they passed Azure-style
             if r_l in AZURE_REGIONS:
-                fix = f"'{region_raw}' looks like an Azure region. Use AWS codes like us-east-1 or us-west-2. Closest: {suggestions}"
+                fix = f"'{region_raw}' looks like an Azure region. Use AWS codes like us-east-1, us-west-2, or us-gov-west-1. Closest: {suggestions}"
             else:
-                fix = f"Use AWS region codes like us-east-1, us-east-2, us-west-2. Closest: {suggestions}"
+                fix = f"Use AWS region codes like us-east-1, us-west-2, or us-gov-west-1. Closest: {suggestions}"
             issues.append(Issue(
                 "error", "region",
                 f"invalid AWS region '{region_raw}'",
