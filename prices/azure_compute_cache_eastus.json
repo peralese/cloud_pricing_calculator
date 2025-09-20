@@ -30,5 +30,13 @@
   "B8as v2|windows": {
     "price": 0.338,
     "ts": 1758244289
+  },
+  "B2as v2|windows": {
+    "price": 0.0844,
+    "ts": 1758339075
+  },
+  "B32als v2|linux": {
+    "price": 1.065,
+    "ts": 1758339078
   }
 }
