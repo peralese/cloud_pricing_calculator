@@ -630,21 +630,24 @@ def _detect_environment_column(df) -> str | None:
             return c
     return None
 
-def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df):
+# ---------------------- Excel output helpers ----------------------
+def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df: pd.DataFrame):
     out_xlsx = price_csv_path.with_suffix(".xlsx")
     run_dir = price_csv_path.parent
     summary_csv = run_dir / "summary.csv"
 
     env_col = _detect_environment_column(all_rows_df)
-    if env_col:
-        env_series = all_rows_df[env_col].fillna("Unspecified").astype(str)
-    else:
-        env_series = None
+    env_series = (
+        all_rows_df[env_col].fillna("Unspecified").astype(str)
+        if env_col else None
+    )
 
     with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as writer:
+        # All rows
         all_rows_df.to_excel(writer, index=False, sheet_name="All")
         _autosize_and_style(writer, all_rows_df, "All")
 
+        # Per-environment tabs (if any)
         if env_series is not None:
             for env_value in sorted(set(env_series)):
                 sub = all_rows_df[env_series == env_value]
@@ -660,6 +663,7 @@ def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df):
                 sub.to_excel(writer, index=False, sheet_name=sheet)
                 _autosize_and_style(writer, sub, sheet)
 
+        # Summary (if present as CSV)
         if summary_csv.exists():
             try:
                 df_summary = pd.read_csv(summary_csv)
@@ -667,8 +671,146 @@ def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df):
                 _autosize_and_style(writer, df_summary, "Summary")
             except Exception:
                 pass
+
+        # Executive summary (always attempt)
+        try:
+            exec_df = _build_exec_summary(all_rows_df)
+            if not exec_df.empty:
+                exec_df.to_excel(writer, index=False, sheet_name="ExecutiveSummary")
+                _autosize_and_style(writer, exec_df, "ExecutiveSummary")
+        except Exception as e:
+            print(f"⚠️ Executive summary skipped: {e}")
+
     print(f"Wrote Excel workbook with environment tabs → {out_xlsx}")
 
+
+# ---------------------- Executive summary ----------------------
+def _build_exec_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Itemized executive summary built from priced rows.
+
+    - Compute items (Windows/RHEL/SUSE/Linux): sums monthly_compute_usd, per-unit is the average per row.
+    - Database items (RDS/Azure SQL): sums monthly_db_usd, per-unit is the average per row.
+    - Extra lines: Storage (block + object) and Network, summed once across all rows.
+    - Adds Annual Cost and a Total row.
+    """
+    df = df.copy()
+
+    # Normalize numeric columns we’ll aggregate
+    for c in [
+        "monthly_compute_usd", "monthly_ebs_usd", "monthly_s3_usd",
+        "monthly_network_usd", "monthly_db_usd", "monthly_total_usd"
+    ]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        else:
+            df[c] = 0.0
+
+    # Label each row (compute vs RDS vs Azure SQL)
+    os_col  = df.get("os", pd.Series([""] * len(df))).astype(str).str.strip().str.lower()
+    engine  = df.get("db_engine", pd.Series([""] * len(df))).astype(str).str.strip().str.lower()
+    cloud   = df.get("cloud", pd.Series([""] * len(df))).astype(str).str.strip().str.lower()
+    has_az_sql = (cloud == "azure") & (df["monthly_db_usd"] > 0)
+
+    labels = []
+    for i in range(len(df)):
+        row_os = os_col.iloc[i]
+        if row_os == "windows":
+            labels.append("Windows VMs")
+        elif row_os == "rhel":
+            labels.append("RHEL Servers")
+        elif row_os == "suse":
+            labels.append("SUSE Servers")
+        elif row_os == "linux":
+            labels.append("Linux VMs (generic)")
+        elif has_az_sql.iloc[i]:
+            # optional tier/deployment detail if present
+            tier = str(df.get("az_sql_tier", pd.Series([""]*len(df))).iloc[i]).strip()
+            dep  = str(df.get("az_sql_deployment", pd.Series([""]*len(df))).iloc[i]).strip()
+            t = tier or "Azure SQL"
+            d = f" – {dep}" if dep else ""
+            labels.append(f"Azure SQL ({t}{d})")
+        elif engine.iloc[i]:
+            it = str(df.get("db_instance_class", pd.Series([""]*len(df))).iloc[i]).strip()
+            itxt = f" ({it})" if it else ""
+            labels.append(f"RDS {engine.iloc[i].capitalize()}{itxt}")
+        else:
+            labels.append("Other Compute/Services")
+
+    df["_item_label"] = labels
+
+    # Aggregate per label
+    rows = []
+    for label, sub in df.groupby("_item_label", dropna=False):
+        if label.startswith(("RDS ", "Azure SQL")):
+            unit = sub["monthly_db_usd"].mean()
+            monthly = sub["monthly_db_usd"].sum()
+        elif label.endswith(("VMs", "Servers")) or label.startswith("Linux"):
+            unit = sub["monthly_compute_usd"].mean()
+            monthly = sub["monthly_compute_usd"].sum()
+        else:
+            # Fallback – use total if we don’t recognize the bucket
+            unit = sub["monthly_total_usd"].mean()
+            monthly = sub["monthly_total_usd"].sum()
+
+        rows.append({
+            "Item": label,
+            "Per Unit Cost (mo)": round(unit, 2) if unit > 0 else "",
+            "Monthly Cost": round(monthly, 2),
+        })
+
+    # Add extra line items (singletons)
+    def _add_extra(name: str, series: pd.Series):
+        total = float(series.sum()) if series is not None else 0.0
+        if total > 0:
+            rows.append({"Item": name, "Per Unit Cost (mo)": "", "Monthly Cost": round(total, 2)})
+
+    _add_extra("Block Storage (EBS/Managed Disk)", df.get("monthly_ebs_usd"))
+    _add_extra("Object Storage (S3/Blob)",         df.get("monthly_s3_usd"))
+    _add_extra("Network (egress/DTO)",             df.get("monthly_network_usd"))
+
+    out = pd.DataFrame(rows)
+
+    # Annual and totals
+    if not out.empty:
+        out["Annual Cost"] = (out["Monthly Cost"] * 12.0).round(2)
+        total_row = pd.DataFrame([{
+            "Item": "Total",
+            "Per Unit Cost (mo)": "",
+            "Monthly Cost": round(out["Monthly Cost"].sum(), 2),
+            "Annual Cost": round((out["Monthly Cost"].sum() * 12.0), 2),
+        }])
+        out = pd.concat([out, total_row], ignore_index=True)
+
+    return out
+
+
+    # Add explicit storage/network rollups using dedicated columns (regardless of item labels)
+    def _add_extra(label, col):
+        if col in df.columns:
+            val = float(df[col].sum())
+            if val > 0:
+                rows.append({"Item": label, "Per Unit Cost (mo)": "", "Monthly Cost": round(val, 2), "Annual Cost": round(val*12.0, 2)})
+
+    _add_extra("Block Storage (EBS / Managed Disk)", "monthly_ebs_usd")
+    _add_extra("Object Storage (S3 / Blob)", "monthly_s3_usd")
+    _add_extra("Network Egress (DTO)", "monthly_network_usd")
+
+    # Collapse to DataFrame and push Total to bottom
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        total_row = pd.DataFrame([{
+            "Item": "Total",
+            "Per Unit Cost (mo)": "",
+            "Monthly Cost": round(out["Monthly Cost"].sum(), 2),
+            "Annual Cost": round(out["Annual Cost"].sum(), 2),
+        }])
+        # Deduplicate any duplicate storage/network lines if grouping also produced them
+        out = (out.groupby("Item", as_index=False)
+                 .agg({"Per Unit Cost (mo)":"first","Monthly Cost":"sum","Annual Cost":"sum"}))
+        # Move Total to bottom
+        out = pd.concat([out[out["Item"]!="Total"], total_row], ignore_index=True)
+    return out
 # ---------------------- entry ----------------------
 if __name__ == "__main__":
     cli()
