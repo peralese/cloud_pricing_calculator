@@ -253,6 +253,7 @@ def price_rds_ondemand(engine: str, instance_class: str, region: str, license_mo
 from pathlib import Path
 
 def _load_override_json(path: Path):
+    if not path.exists(): return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)

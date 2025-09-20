@@ -1,4 +1,3 @@
-# main.py
 from __future__ import annotations
 
 import sys
@@ -34,6 +33,8 @@ from pricing import (
     price_ec2_ondemand,
     monthly_compute_cost, monthly_ebs_cost, monthly_s3_cost,
     monthly_network_cost, monthly_rds_cost,
+    # Azure DB pricing helpers (already implemented in pricing.py)
+    monthly_azure_sql_cost,
 )
 
 # Azure VM price function may be optional depending on your tree — import defensively.
@@ -49,6 +50,23 @@ def as_float(x, default=0.0) -> float:
         if x is None or x == "":
             return default
         return float(x)
+    except Exception:
+        return default
+
+def as_float_opt(x) -> float | None:
+    """Parse to float or return None when not provided/invalid."""
+    try:
+        if x is None or str(x).strip() == "":
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+def as_int(x, default=0) -> int:
+    try:
+        if x is None or x == "":
+            return default
+        return int(float(x))
     except Exception:
         return default
 
@@ -375,7 +393,6 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
         try:
             run_dir = Path(rec_out).parent
             write_run_summary(run_dir, rec_out, None)
-            # write_run_summary(Path(rec_out).parent, rec_out, None)
         except Exception as e:
             click.echo(f"⚠️ Summary generation failed: {e}", err=True)
 
@@ -440,8 +457,7 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         itype = r.get("recommended_instance_type") or r.get("instance_type") or ""
         region_row = (r.get("region") or region or ("eastus" if row_cloud == "azure" else None))
         os_row = (r.get("os") or os_name or "Linux").strip()
-        lm1 = r.get("license_model")
-        license_model = (r.get("license_model.1") or lm1 or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
+        license_model = (r.get("license_model") or ("AWS" if row_cloud == "aws" else "BYOL")).strip()
 
         # BYOL → treat compute as Linux price component
         os_for_compute = "Linux" if license_model.lower() == "byol" else os_row
@@ -455,11 +471,11 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 if azure_vm_price_hourly is None:
                     raise SystemExit("❌ Azure pricing function not available: pricing.azure_vm_price_hourly")
                 compute_price = azure_vm_price_hourly(
-                    region_row, itype, os_for_compute, license_model, refresh=refresh_azure_prices
+                    str(region_row), itype, os_for_compute, license_model, refresh=refresh_azure_prices
                 )
                 r["pricing_note"] = r.get("pricing_note", "")
             else:
-                compute_price = price_ec2_ondemand(itype, region_row, os_name=os_for_compute)
+                compute_price = price_ec2_ondemand(itype, str(region_row), os_name=os_for_compute)
                 r["pricing_note"] = r.get("pricing_note", "") if compute_price is not None else \
                     "No EC2 price found (check filters/region/OS)"
 
@@ -484,79 +500,56 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
             r["monthly_s3_usd"] = f"{monthly_s3_cost(s3_gb):.2f}"
             r["monthly_network_usd"] = f"{monthly_network_cost(net_prof):.2f}"
 
+            # ----- Database monthly cost -----
             if row_cloud == "aws":
                 db_engine = (r.get("db_engine") or "").strip()
                 db_class = (r.get("db_instance_class") or "").strip()
                 db_multi_az = as_bool(r.get("multi_az"), False)
                 if db_engine and db_class and region_row:
-                    # ---- Normalize engine for AWS Pricing API ----
-                    _eng_map = {
-                        "mysql": "MySQL",
-                        "mariadb": "MariaDB",
-                        "postgres": "PostgreSQL",
-                        "postgresql": "PostgreSQL",
-                        "oracle": "Oracle",
-                        "sqlserver": "SQL Server",
-                        "sql server": "SQL Server",
-                    }
-                    eng_key = db_engine.strip().lower()
-                    db_engine_norm = _eng_map.get(eng_key, db_engine)
-
-                    # ---- License handling by engine ----
-                    lm_in = (r.get("license_model") or "").strip()
-                    # Default to License included for engines that don't support BYOL on RDS
-                    if db_engine_norm in {"MySQL", "PostgreSQL", "MariaDB", "SQL Server"}:
-                        license_model = "AWS"  # our code maps this to "License included"
-                        if eng_key == "sqlserver" and lm_in.lower() == "byol":
-                            r["pricing_note"] = (r.get("pricing_note","") + " | RDS SQL forces License-Included").strip(" |")
-                    # Oracle keeps whatever user provided (BYOL or LI)
-                    # db_monthly = monthly_rds_cost(db_engine, db_class, region_row, license_model, db_multi_az, hours)
-                    db_monthly = monthly_rds_cost(db_engine_norm, db_class, region_row, license_model, db_multi_az, hours)
+                    db_monthly = monthly_rds_cost(db_engine, db_class, str(region_row), license_model, db_multi_az, hours)
                 else:
                     db_monthly = 0.0
-            elif row_cloud == "azure":
-                # ---------- Azure SQL DB / Managed Instance (SQL Server only) ----------
-                db_monthly = 0.0
-                try:
-                    db_engine = (r.get("db_engine") or "").strip().lower()
-                    if db_engine in {"sqlserver", "sql server"}:
-                        from pricing import monthly_azure_sql_cost
-                        deployment = (r.get("db_deployment") or "single").strip().lower()   # "single" or "mi"
-                        if deployment not in {"single", "mi"}:
-                            deployment = "single"
-                        tier = (r.get("db_tier") or "GeneralPurpose").strip()
-                        family = (r.get("db_family") or "").strip() or None
-                        # Default vCores/storage if omitted
-                        v_raw = r.get("db_vcores")
-                        vcores = int(v_raw) if str(v_raw).strip().lower() not in {"", "none", "null"} else 8
-                        storage_gb = as_float(r.get("db_storage_gb"), 128.0)
-                        # Azure: use the already-normalized license_model from above in this loop
-                        lm = (license_model or "").strip().lower()
-                        license_model_az = "AHUB" if lm in {"byol", "ahub", "azure hybrid benefit", "hybrid"} else "LicenseIncluded"
-                        db_monthly = monthly_azure_sql_cost(
-                            deployment=deployment,
-                            region=str(region_row or "eastus"),
-                            tier=tier,
-                            family=family,
-                            vcores=float(vcores),
-                            storage_gb=storage_gb,
-                            license_model=license_model_az,
-                            hours=float(hours),
-                        )
-                       # Debug: show pure heuristic LI vs AHUB (ignore overrides for clarity)
-                        li_monthly  = monthly_azure_sql_cost(deployment, str(region_row or "eastus"), tier, family,
-                                               float(vcores), storage_gb, "LicenseIncluded", float(hours),
-                                               use_overrides=False)
-
-                        ahub_monthly = monthly_azure_sql_cost(deployment, str(region_row or "eastus"), tier, family, float(vcores), storage_gb, "AHUB", float(hours),use_overrides=False)
-                        r["pricing_note"] = (r.get("pricing_note","") +
-                        f" | Azure SQL {deployment} {tier} {vcores} vC, {storage_gb} GB, "
-                        f"effective_license={license_model_az} li=${li_monthly:.2f} ahub=${ahub_monthly:.2f}").strip(" |")
-
-                except Exception as e:
-                    r["pricing_note"] = (r.get("pricing_note","") + f" | DB pricing skipped: {e}").strip(" |")
             else:
+                # Azure: sum SQL DB/MI (includes backup/storage per model) + Cosmos DB
                 db_monthly = 0.0
+
+                # Azure SQL DB/Managed Instance (Option B)
+                def _first(*names):
+                    for n in names:
+                        v = r.get(n)
+                        if v not in (None, ""):
+                            return v
+                    return None
+
+                az_dep = (str(_first("az_sql_deployment", "db_deployment") or "")).strip().lower()  # "single" | "mi"
+                if az_dep in {"single", "mi"}:
+                    az_tier    = (str(_first("az_sql_tier", "db_tier") or "GeneralPurpose")).strip()
+                    az_family  = (str(_first("az_sql_family", "db_family") or "")).strip() or None  # e.g., "Gen5" or blank
+                    az_vcores  = as_float(_first("az_sql_vcores", "db_vcores"), 0.0)
+                    # IMPORTANT: use your shared column here
+                    az_storage = as_float(_first("az_sql_storage_gb", "db_storage_gb"), 0.0)
+
+                    # Prefer explicit Azure-style license model; else map generic license_model
+                    lic_raw = (str(_first("az_sql_license_model", "license_model") or "LicenseIncluded")).strip()
+                    # Map BYOL -> AHUB for Azure SQL semantics
+                    az_lic = "AHUB" if lic_raw.upper() in {"BYOL", "AHUB"} else "LicenseIncluded"
+
+                    if (az_vcores > 0 or az_storage > 0) and region_row:
+                        try:
+                            db_monthly += monthly_azure_sql_cost(
+                                "mi" if az_dep == "mi" else "single",
+                                str(region_row),
+                                az_tier,
+                                az_family,
+                                az_vcores,
+                                az_storage,  # includes backup/storage in our model
+                                az_lic,
+                                hours,
+                            )
+                        except Exception:
+                            pass  # keep pricing robust
+
+
             r["monthly_db_usd"] = f"{db_monthly:.2f}"
             parts = [
                 as_float(r["monthly_compute_usd"]),
@@ -566,8 +559,6 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 as_float(r["monthly_db_usd"]),
             ]
             r["monthly_total_usd"] = f"{sum(parts):.2f}"
-            mt = float(r.get("monthly_total_usd") or 0.0)
-            r["annual_total_usd"] = round(mt * 12.0, 2)
 
         r["provider"] = row_cloud
         out_rows.append(r)
@@ -600,7 +591,6 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         try:
             run_dir = Path(out_path).parent
             write_run_summary(run_dir, None, out_path)
-            # write_run_summary(Path(out_path).parent, None, out_path)
         except Exception as e:
             print(f"⚠️ Summary generation failed: {e}")
 
@@ -682,3 +672,4 @@ def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df):
 # ---------------------- entry ----------------------
 if __name__ == "__main__":
     cli()
+
