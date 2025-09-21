@@ -242,7 +242,9 @@ def baseline_cmd(cloud):
     inputs = baseline_prompt()
     rates  = baseline_rates(inputs.region)
     rows, total = compute_baseline(inputs, rates)
-    run_dir = _new_run_dir()
+    # Prefer the latest recommend run folder so all artifacts stay together
+    latest_rec = find_latest_output()
+    run_dir = latest_rec.parent if latest_rec else _new_run_dir()
     out_csv = write_baseline_csv(run_dir, rows)
     click.echo(f"Wrote baseline → {out_csv}")
 
@@ -773,9 +775,10 @@ def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df: pd.DataFram
             if baseline_total > 0 and not exec_df.empty:
                 exec_wo_total = exec_df[exec_df["Item"] != "Total"].copy()
                 base_row = pd.DataFrame([{
-                    "Item": "AWS VPC Baseline",
+                    "Item": "AWS VPC Overhead (Baseline)",
                     "Per Unit Cost (mo)": "",
                     "Monthly Cost": round(baseline_total, 2),
+                    "Annual Cost": round(baseline_total * 12.0, 2),
                 }])
                 exec_wo_total = pd.concat([exec_wo_total, base_row], ignore_index=True)
                 new_total_monthly = float(exec_wo_total["Monthly Cost"].sum())
