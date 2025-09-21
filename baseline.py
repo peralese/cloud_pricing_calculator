@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Dict, List, Tuple
+import json
+import os
+
+import click
+
+
+# --------------------------- Data & Defaults ---------------------------
+
+# Built-in conservative defaults (USD)
+# You can override via ENV or prices/aws_vpc_baseline.json
+_DEFAULT_RATES = {
+    "tgw_attachment_hourly": float(os.getenv("TGW_ATTACHMENT_HOURLY", "0.06")),  # $/attachment-hour
+    "tgw_data_gb":           float(os.getenv("TGW_DATA_GB", "0.02")),            # $/GB
+    "vpce_if_hourly":        float(os.getenv("VPCE_IF_HOURLY", "0.01")),         # $/endpoint-hour
+    "vpce_data_gb":          float(os.getenv("VPCE_DATA_GB", "0.01")),           # $/GB
+}
+
+HOURS_DEFAULT = 730.0  # default hours/month across the app
+
+
+@dataclass(frozen=True)
+class BaselineInputs:
+    region: str
+    tgw_attachments: int
+    tgw_data_gb: float
+    vpce_base_per_az: int
+    vpce_extra_per_az: int
+    vpce_azs: int
+    vpce_data_gb: float
+    hours_per_month: float = HOURS_DEFAULT
+
+
+@dataclass(frozen=True)
+class BaselineRates:
+    tgw_attachment_hourly: float
+    tgw_data_gb: float
+    vpce_if_hourly: float
+    vpce_data_gb: float
+
+
+# --------------------------- Rates & I/O ---------------------------
+
+def _load_rates_from_json(region: str) -> Optional[Dict[str, float]]:
+    """
+    Optional per-region override JSON: prices/aws_vpc_baseline.json
+    {
+      "us-east-1": {
+        "tgw_attachment_hourly": 0.06,
+        "tgw_data_gb": 0.02,
+        "vpce_if_hourly": 0.01,
+        "vpce_data_gb": 0.01
+      }
+    }
+    """
+    p = Path("prices/aws_vpc_baseline.json")
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        region_rates = data.get(region) or data.get(region.strip().lower())
+        if isinstance(region_rates, dict):
+            return {k: float(v) for k, v in region_rates.items()}
+        return None
+    except Exception:
+        return None
+
+
+def resolve_rates(region: str) -> BaselineRates:
+    # Priority: JSON override (per region) -> ENV -> built-ins
+    merged = dict(_DEFAULT_RATES)
+    j = _load_rates_from_json(region) or {}
+    merged.update(j)
+    return BaselineRates(
+        tgw_attachment_hourly=float(merged["tgw_attachment_hourly"]),
+        tgw_data_gb=float(merged["tgw_data_gb"]),
+        vpce_if_hourly=float(merged["vpce_if_hourly"]),
+        vpce_data_gb=float(merged["vpce_data_gb"]),
+    )
+
+
+# --------------------------- Computation ---------------------------
+
+def compute_baseline(inputs: BaselineInputs, rates: BaselineRates) -> Tuple[List[dict], float]:
+    """
+    Returns (rows, total_monthly_usd).
+    Rows are itemized for CSV/Excel.
+    """
+    hpmo = float(inputs.hours_per_month)
+
+    # TGW
+    tgw_attach_monthly = max(0, inputs.tgw_attachments) * rates.tgw_attachment_hourly * hpmo
+    tgw_data_monthly = max(0.0, inputs.tgw_data_gb) * rates.tgw_data_gb
+
+    # Interface Endpoints (PrivateLink) - per-AZ counts
+    total_endpoints = (max(0, inputs.vpce_base_per_az) + max(0, inputs.vpce_extra_per_az)) * max(1, inputs.vpce_azs)
+    vpce_attach_monthly = total_endpoints * rates.vpce_if_hourly * hpmo
+    vpce_data_monthly = max(0.0, inputs.vpce_data_gb) * rates.vpce_data_gb
+
+    rows = [
+        {
+            "component": "TGW Attachment",
+            "detail": "attachments",
+            "qty": inputs.tgw_attachments,
+            "unit": "attachment-hour",
+            "rate": f"{rates.tgw_attachment_hourly:.5f}",
+            "monthly_usd": f"{tgw_attach_monthly:.2f}",
+            "region": inputs.region,
+            "notes": f"{hpmo:g} hours assumed",
+        },
+        {
+            "component": "TGW Data",
+            "detail": "data processed",
+            "qty": inputs.tgw_data_gb,
+            "unit": "GB",
+            "rate": f"{rates.tgw_data_gb:.5f}",
+            "monthly_usd": f"{tgw_data_monthly:.2f}",
+            "region": inputs.region,
+            "notes": "",
+        },
+        {
+            "component": "Interface Endpoint",
+            "detail": "endpoints x AZs",
+            "qty": total_endpoints,
+            "unit": "endpoint-hour",
+            "rate": f"{rates.vpce_if_hourly:.5f}",
+            "monthly_usd": f"{vpce_attach_monthly:.2f}",
+            "region": inputs.region,
+            "notes": f"{hpmo:g} hours assumed",
+        },
+        {
+            "component": "Interface Endpoint Data",
+            "detail": "data processed",
+            "qty": inputs.vpce_data_gb,
+            "unit": "GB",
+            "rate": f"{rates.vpce_data_gb:.5f}",
+            "monthly_usd": f"{vpce_data_monthly:.2f}",
+            "region": inputs.region,
+            "notes": "",
+        },
+    ]
+    total = tgw_attach_monthly + tgw_data_monthly + vpce_attach_monthly + vpce_data_monthly
+    rows.append({
+        "component": "TOTAL",
+        "detail": "",
+        "qty": "",
+        "unit": "",
+        "rate": "",
+        "monthly_usd": f"{total:.2f}",
+        "region": inputs.region,
+        "notes": "",
+    })
+    return rows, total
+
+
+# --------------------------- Writer ---------------------------
+
+def write_baseline_csv(run_dir: Path, rows: List[dict]) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    out = run_dir / "baseline.csv"
+    import csv
+    fieldnames = ["component", "detail", "qty", "unit", "rate", "monthly_usd", "region", "notes"]
+    with out.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    return out
+
+
+# --------------------------- Prompt Flow ---------------------------
+
+def prompt_for_inputs() -> BaselineInputs:
+    """
+    Interactive prompts with your requested defaults:
+      - tgw_attachments = 1
+      - tgw_data_gb = 100
+      - vpce_base_per_az = 8  (core services per AZ)
+    We also default:
+      - vpce_extra_per_az = 0
+      - vpce_azs = 2
+      - vpce_data_gb = (copy of tgw_data_gb unless overridden)
+    """
+    region = click.prompt("AWS region (e.g., us-east-1)", type=str).strip()
+
+    tgw_attachments = click.prompt("Number of TGW attachments", type=int, default=1)
+    tgw_data_gb = click.prompt("Estimated total TGW data processed per month (GB)", type=float, default=100.0)
+
+    vpce_base_per_az = click.prompt("Base Interface Endpoints per AZ (core services)", type=int, default=8)
+    vpce_extra_per_az = click.prompt("Extra Interface Endpoints per AZ (e.g., RDS, Backup)", type=int, default=0)
+    vpce_azs = click.prompt("Number of AZs", type=int, default=2)
+
+    vpce_data_gb_default = tgw_data_gb
+    vpce_data_gb = click.prompt("Total data processed by all Interface Endpoints per month (GB)",
+                                type=float, default=vpce_data_gb_default)
+
+    return BaselineInputs(
+        region=region,
+        tgw_attachments=max(0, tgw_attachments),
+        tgw_data_gb=max(0.0, tgw_data_gb),
+        vpce_base_per_az=max(0, vpce_base_per_az),
+        vpce_extra_per_az=max(0, vpce_extra_per_az),
+        vpce_azs=max(1, vpce_azs),
+        vpce_data_gb=max(0.0, vpce_data_gb),
+        hours_per_month=HOURS_DEFAULT,
+    )

@@ -43,6 +43,16 @@ try:
 except Exception:
     azure_vm_price_hourly = None  # type: ignore
 
+# Baseline module (prompt-driven)
+try:
+    from baseline import (
+        prompt_for_inputs as baseline_prompt,
+        resolve_rates   as baseline_rates,
+        compute_baseline,
+        write_baseline_csv,
+    )
+except Exception:
+    baseline_prompt = baseline_rates = compute_baseline = write_baseline_csv = None  # type: ignore
 
 # ---------------------- Small utilities ----------------------
 def as_float(x, default=0.0) -> float:
@@ -189,6 +199,19 @@ def find_latest_output(patterns: Optional[List[str]] = None) -> Optional[Path]:
 
     return max((Path(p) for p in candidates), key=lambda p: p.stat().st_mtime)
 
+def _find_baseline_csv(preferred_dir: Path) -> Optional[Path]:
+    """
+    Prefer baseline.csv in the current run folder. If not found,
+    fall back to the most-recent baseline.csv anywhere under ./output.
+    """
+    p = preferred_dir / "baseline.csv"
+    if p.exists():
+        return p
+    from glob import glob
+    candidates = glob("output/**/baseline.csv", recursive=True)
+    if not candidates:
+        return None
+    return max((Path(c) for c in candidates), key=lambda q: q.stat().st_mtime)
 
 # ---------------------- CLI root ----------------------
 @click.group()
@@ -196,6 +219,38 @@ def cli():
     """Cloud Pricing Calculator CLI."""
     pass
 
+@cli.command(name="baseline")
+@click.option("--cloud", type=click.Choice(["aws"], case_sensitive=False), required=True,
+              help="Only 'aws' is supported for baseline at this time.")
+def baseline_cmd(cloud):
+    """
+    Prompt-driven baseline cost capture for AWS VPC networking:
+      - Transit Gateway (attachments + data)
+      - Interface Endpoints / PrivateLink (per-AZ counts + data)
+    Defaults per your guidance:
+      attachments=1, tgw_data_gb=100, base_endpoints_per_az=8, azs=2, vpce_data_gb defaults to tgw_data_gb.
+    """
+    if (cloud or "").lower() != "aws":
+        click.echo("ERROR: baseline currently supports only AWS.", err=True)
+        sys.exit(2)
+    if not (baseline_prompt and baseline_rates and compute_baseline and write_baseline_csv):
+        click.echo("ERROR: baseline module unavailable (baseline.py not found or import failed).", err=True)
+        sys.exit(2)
+
+    # Interactive prompts → compute → write baseline.csv into a fresh run folder
+    inputs = baseline_prompt()
+    rates  = baseline_rates(inputs.region)
+    rows, total = compute_baseline(inputs, rates)
+    run_dir = _new_run_dir()
+    out_csv = write_baseline_csv(run_dir, rows)
+    click.echo(f"Wrote baseline → {out_csv}")
+
+    # Opportunistically refresh summary artifacts for that run folder
+    if write_run_summary:
+        try:
+            write_run_summary(run_dir, None, None)
+        except Exception as e:
+            click.echo(f"⚠️ Summary generation failed: {e}", err=True)
 
 # ---------------------- list regions (helpers) ----------------------
 @cli.command(name="list-aws-regions")
@@ -635,6 +690,7 @@ def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df: pd.DataFram
     out_xlsx = price_csv_path.with_suffix(".xlsx")
     run_dir = price_csv_path.parent
     summary_csv = run_dir / "summary.csv"
+    baseline_csv = run_dir / "baseline.csv"
 
     env_col = _detect_environment_column(all_rows_df)
     env_series = (
@@ -672,9 +728,64 @@ def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df: pd.DataFram
             except Exception:
                 pass
 
+        # Baseline (if present) — itemized baseline.csv
+        if baseline_csv.exists():
+            try:
+                df_base = pd.read_csv(baseline_csv)
+                df_base.to_excel(writer, index=False, sheet_name="Baseline")
+                _autosize_and_style(writer, df_base, "Baseline")
+            except Exception:
+                pass
+
         # Executive summary (always attempt)
+        # try:
+        #     exec_df = _build_exec_summary(all_rows_df)
+        #     if not exec_df.empty:
+        #         exec_df.to_excel(writer, index=False, sheet_name="ExecutiveSummary")
+        #         _autosize_and_style(writer, exec_df, "ExecutiveSummary")
+        # except Exception as e:
+        #     print(f"⚠️ Executive summary skipped: {e}")
+        # Executive summary (+ optional Baseline row)
         try:
             exec_df = _build_exec_summary(all_rows_df)
+            baseline_total = 0.0
+            if baseline_csv and baseline_csv.exists():
+                try:
+                    df_base = pd.read_csv(baseline_csv)
+                    # Write Baseline sheet for transparency
+                    df_base.to_excel(writer, index=False, sheet_name="Baseline")
+                    _autosize_and_style(writer, df_base, "Baseline")
+                    # Pull total from explicit TOTAL row if present, else sum monthly_usd
+                    col = "monthly_usd"
+                    if col in df_base.columns:
+                        if "component" in df_base.columns and df_base["component"].astype(str).str.upper().eq("TOTAL").any():
+                            baseline_total = float(pd.to_numeric(
+                                df_base.loc[df_base["component"].astype(str).str.upper() == "TOTAL", col],
+                                errors="coerce"
+                            ).fillna(0.0).iloc[0])
+                        else:
+                            baseline_total = float(pd.to_numeric(df_base[col], errors="coerce").fillna(0.0).sum())
+                except Exception:
+                    baseline_total = 0.0
+
+            # If we have a baseline total, append it to ExecutiveSummary and recompute Total row
+            if baseline_total > 0 and not exec_df.empty:
+                exec_wo_total = exec_df[exec_df["Item"] != "Total"].copy()
+                base_row = pd.DataFrame([{
+                    "Item": "AWS VPC Baseline",
+                    "Per Unit Cost (mo)": "",
+                    "Monthly Cost": round(baseline_total, 2),
+                }])
+                exec_wo_total = pd.concat([exec_wo_total, base_row], ignore_index=True)
+                new_total_monthly = float(exec_wo_total["Monthly Cost"].sum())
+                total_row = pd.DataFrame([{
+                    "Item": "Total",
+                    "Per Unit Cost (mo)": "",
+                    "Monthly Cost": round(new_total_monthly, 2),
+                    "Annual Cost": round(new_total_monthly * 12.0, 2),
+                }])
+                exec_df = pd.concat([exec_wo_total, total_row], ignore_index=True)
+
             if not exec_df.empty:
                 exec_df.to_excel(writer, index=False, sheet_name="ExecutiveSummary")
                 _autosize_and_style(writer, exec_df, "ExecutiveSummary")

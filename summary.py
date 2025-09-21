@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
+from glob import glob
 
 import pandas as pd
 
@@ -44,6 +45,49 @@ def _load_table(p: Optional[Path]) -> Optional[pd.DataFrame]:
         # For our outputs: default first sheet is "Results"
         return pd.read_excel(p, sheet_name=0)
     return None
+
+def _find_baseline_csv_prefer(run_dir: Path) -> Optional[Path]:
+    p = run_dir / "baseline.csv"
+    if p.exists():
+        return p
+    cands = glob("output/**/baseline.csv", recursive=True)
+    if not cands:
+        return None
+    return max((Path(c) for c in cands), key=lambda q: q.stat().st_mtime)
+
+def _sum_baseline_from(csv_path: Optional[Path]) -> float:
+    if not csv_path or not csv_path.exists():
+        return 0.0
+    try:
+        df = pd.read_csv(csv_path)
+        if "monthly_usd" not in df.columns:
+            return 0.0
+        if "component" in df.columns and df["component"].astype(str).str.upper().eq("TOTAL").any():
+            return float(pd.to_numeric(
+                df.loc[df["component"].astype(str).str.upper() == "TOTAL", "monthly_usd"],
+                errors="coerce"
+            ).fillna(0.0).iloc[0])
+        return float(pd.to_numeric(df["monthly_usd"], errors="coerce").fillna(0.0).sum())
+    except Exception:
+        return 0.0
+
+def _sum_baseline(run_dir: Path) -> float:
+    """If baseline.csv exists in run_dir, return explicit TOTAL row if present, else sum monthly_usd."""
+    p = run_dir / "baseline.csv"
+    if not p.exists():
+        return 0.0
+    try:
+        df = pd.read_csv(p)
+        if "monthly_usd" not in df.columns:
+            return 0.0
+        # Prefer explicit TOTAL row
+        if "component" in df.columns:
+            tot = df[df["component"].astype(str).str.upper() == "TOTAL"]
+            if not tot.empty:
+                return float(pd.to_numeric(tot["monthly_usd"], errors="coerce").fillna(0.0).iloc[0])
+        return float(pd.to_numeric(df["monthly_usd"], errors="coerce").fillna(0.0).sum())
+    except Exception:
+        return 0.0
 
 
 def _detect_artifacts(run_dir: Path, rec_path: Optional[Path], price_path: Optional[Path]) -> RunArtifacts:
@@ -184,6 +228,16 @@ def write_run_summary(run_dir: Path, recommend_path: Optional[Path], price_path:
         if price_df is not None:
             price_stats, top_df = _summarize_price(price_df)
             summary_kv.update(price_stats)
+
+        # Baseline roll up (if any)
+        baseline_total = _sum_baseline(arts.run_dir)
+        if baseline_total > 0.0:
+            # Add explicit metrics and an all-in grand total if we already have monthly sum
+            summary_kv["monthly_baseline_total"] = round(baseline_total, 2)
+            if "sum_monthly_total_usd" in summary_kv:
+                summary_kv["monthly_grand_total_including_baseline"] = round(
+                    float(summary_kv["sum_monthly_total_usd"]) + baseline_total, 2
+                )
 
         # Write files
         _write_summary_files(arts.run_dir, summary_kv, top_df)
