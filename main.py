@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Optional, List, Dict
 import re
+from glob import glob
 
 import click
 import pandas as pd
@@ -690,7 +691,7 @@ def _write_pricing_excel_workbook(price_csv_path: Path, all_rows_df: pd.DataFram
     out_xlsx = price_csv_path.with_suffix(".xlsx")
     run_dir = price_csv_path.parent
     summary_csv = run_dir / "summary.csv"
-    baseline_csv = run_dir / "baseline.csv"
+    baseline_csv = _find_baseline_csv(run_dir)
 
     env_col = _detect_environment_column(all_rows_df)
     env_series = (
