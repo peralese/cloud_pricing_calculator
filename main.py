@@ -778,14 +778,23 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
         out_rows.append(r)
 
     # --- Write file ---
-    fieldnames = list(out_rows[0].keys())
-    for col in [
+    # Build fieldnames from the union of keys across all rows so DictWriter won't choke
+    fn_set = set()
+    for r in out_rows:
+        fn_set.update(r.keys())
+
+    # Keep a readable order for common columns, then append any others
+    preferred_order = [
+        "id", "name", "cloud", "region", "environment", "profile",
+        "recommended_instance_type", "instance_type",
+        "db_engine", "db_instance_class", "resolved_db_instance_class",
+        "license_model", "multi_az",
+        "vcpu", "memory_gib", "ebs_gb", "ebs_type", "s3_gb", "network_profile",
         "provider", "price_per_hour_usd", "monthly_compute_usd", "monthly_ebs_usd",
         "monthly_s3_usd", "monthly_network_usd", "monthly_db_usd",
         "monthly_total_usd", "pricing_note"
-    ]:
-        if col not in fieldnames:
-            fieldnames.append(col)
+    ]
+    fieldnames = [c for c in preferred_order if c in fn_set] + [c for c in sorted(fn_set) if c not in preferred_order]
 
     out_path = Path(price_out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
