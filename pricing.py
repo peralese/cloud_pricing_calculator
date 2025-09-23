@@ -166,22 +166,85 @@ def price_ec2_ondemand(instance_type: str, region: str, os_name: str = "Linux") 
 
 def _canon_rds_engine(engine: str) -> str:
     """
-+    Map common CSV-friendly tokens to AWS Price List canonical databaseEngine names.
-+    """
-    m = {
-        "postgres": "PostgreSQL",
-        "postgresql": "PostgreSQL",
-        "aurora-postgres": "Aurora PostgreSQL",
-        "aurora-postgresql": "Aurora PostgreSQL",
-        "aurora-mysql": "Aurora MySQL",
-        "mysql": "MySQL",
-        "mariadb": "MariaDB",
-        "oracle": "Oracle",
-        "sqlserver": "SQL Server",
-        "sql server": "SQL Server",
-    }
-    e = (engine or "").strip().lower()
-    return m.get(e, engine)  # fall back to given value if already canonical
+    Map CSV-friendly / free-text DB engine strings to AWS Price List canonical names.
+    Handles variants like:
+      - "microsoft sql server 2019" -> "SQL Server"
+      - "postgres", "postgresql 13" -> "PostgreSQL"
+      - "aurora mysql"              -> "Aurora MySQL"
+      - "aurora postgres"           -> "Aurora PostgreSQL"
+    """
+    s = (engine or "").strip().lower()
+    if not s:
+        return ""
+    if "aurora" in s and ("postgres" in s or "postgresql" in s):
+        return "Aurora PostgreSQL"
+    if "aurora" in s and "mysql" in s:
+        return "Aurora MySQL"
+    if "postgres" in s:   # matches "postgres", "postgresql", "postgres 13", etc.
+        return "PostgreSQL"
+    if "mysql" in s:
+        return "MySQL"
+    if "mariadb" in s:
+        return "MariaDB"
+    if "oracle" in s:
+        return "Oracle"
+    if "sql" in s and "server" in s:
+        return "SQL Server"
+    # If it already looks canonical, pass it through; otherwise leave as-is
+    if engine in {"MySQL","PostgreSQL","MariaDB","Oracle","SQL Server","Aurora MySQL","Aurora PostgreSQL"}:
+        return engine
+    return engine
+
+def _canon_rds_engine(engine: str) -> str:
+    """
+    Map CSV-friendly / free-text DB engine strings to AWS Price List canonical names.
+    Handles variants like:
+      - "microsoft sql server 2019" -> "SQL Server"
+      - "postgres", "postgresql 13" -> "PostgreSQL"
+      - "aurora mysql"              -> "Aurora MySQL"
+      - "aurora postgres"           -> "Aurora PostgreSQL"
+    """
+    s = (engine or "").strip().lower()
+    if not s:
+        return ""
+    if "aurora" in s and ("postgres" in s or "postgresql" in s):
+        return "Aurora PostgreSQL"
+    if "aurora" in s and "mysql" in s:
+        return "Aurora MySQL"
+    if "postgres" in s:
+        return "PostgreSQL"
+    if "mysql" in s:
+        return "MySQL"
+    if "mariadb" in s:
+        return "MariaDB"
+    if "oracle" in s:
+        return "Oracle"
+    if "sql" in s and "server" in s:
+        return "SQL Server"
+    # Already canonical? pass through.
+    if engine in {"MySQL","PostgreSQL","MariaDB","Oracle","SQL Server","Aurora MySQL","Aurora PostgreSQL"}:
+        return engine
+    return engine
+
+def _normalize_rds_class(instance_class: str) -> str:
+    ic = (instance_class or "").strip()
+    if not ic:
+        return ic
+    return ic if ic.startswith("db.") else f"db.{ic}"
+
+def _license_model_for_rds(canon_engine: str, license_model: str | None) -> str | None:
+    lm_in = (license_model or "").strip().lower()
+    if canon_engine in {"MySQL", "PostgreSQL", "MariaDB", "Aurora MySQL", "Aurora PostgreSQL"}:
+        return "No license required"
+    if canon_engine == "SQL Server":
+        if lm_in == "byol":
+            return None  # don’t price SQL Server BYOL (no matching SKU)
+        return "License included"
+    if canon_engine == "Oracle":
+        return "Bring your own license" if lm_in == "byol" else "License included"
+    return "No license required"
+
+
 
 # --------------------------------------------------------------------
 # Helpers for GovCloud awareness (no refactor required elsewhere)
@@ -221,34 +284,86 @@ def normalize_region(region: str) -> str:
         return r2
     return r  # fall through (let existing validators handle errors)
 
-def price_rds_ondemand(engine: str, instance_class: str, region: str, license_model: str = "AWS", multi_az: bool = False) -> Optional[float]:
+def price_rds_ondemand(
+    engine: str,
+    instance_class: str,
+    region: str,
+    license_model: str = "AWS",
+    multi_az: bool = False
+) -> Optional[float]:
     boto3 = _lazy_boto3()
-    # ✅ normalize region and engine
+    pricing = boto3.client("pricing", region_name="us-east-1")
+
     region = normalize_region(region)
     location = AWS_REGION_TO_LOCATION.get(region)
-    if not location: return None
-    lm = "License included" if (str(license_model).strip().lower() != "byol") else "Bring your own license"
-    dep = "Multi-AZ" if multi_az else "Single-AZ"
-    pricing = boto3.client("pricing", region_name="us-east-1")
-    filters = [
-        {"Type":"TERM_MATCH","Field":"location","Value":location},
-        {"Type":"TERM_MATCH","Field":"databaseEngine","Value":_canon_rds_engine(engine)},
-        {"Type":"TERM_MATCH","Field":"instanceType","Value":instance_class},
-        {"Type":"TERM_MATCH","Field":"deploymentOption","Value":dep},
-        {"Type":"TERM_MATCH","Field":"licenseModel","Value":lm},
-    ]
-    try:
-        resp = pricing.get_products(ServiceCode="AmazonRDS", Filters=filters, MaxResults=100)
-    except Exception:
+    if not location:
         return None
-    for pl in resp.get("PriceList", []):
+
+    canon_engine = _canon_rds_engine(engine)
+    lm = _license_model_for_rds(canon_engine, license_model)
+    if lm is None:
+        return None  # e.g., SQL Server BYOL
+
+    # pricing.py  (inside price_rds_ondemand)
+    ic = _normalize_rds_class(instance_class)
+    if not ic:
+        return None
+
+    dep = "Multi-AZ" if multi_az else "Single-AZ"
+
+    def _try(ic_value: str) -> Optional[float]:
+        filters = [
+            {"Type":"TERM_MATCH","Field":"location","Value":location},
+            {"Type":"TERM_MATCH","Field":"databaseEngine","Value":canon_engine},
+            {"Type":"TERM_MATCH","Field":"instanceType","Value":ic_value},
+            {"Type":"TERM_MATCH","Field":"deploymentOption","Value":dep},
+            {"Type":"TERM_MATCH","Field":"licenseModel","Value":lm},
+        ]
         try:
-            o = json.loads(pl)
+            resp = pricing.get_products(ServiceCode="AmazonRDS", Filters=filters, MaxResults=100)
         except Exception:
-            continue
-        usd = _pricing_first_usd(o)
-        if usd is not None: return usd
+            return None
+        for pl in resp.get("PriceList", []):
+            try:
+                o = json.loads(pl)
+            except Exception:
+                continue
+            usd = _pricing_first_usd(o)
+            if usd is not None:
+                return usd
+        return None
+
+    # Try the requested class first
+    price = _try(ic)
+    if price is not None:
+        return price
+
+    # SQL Server: fall back families (e.g., m7i -> m6i, r7i -> r6i, any c* -> m6i)
+    if canon_engine == "SQL Server" and ic.startswith("db."):
+        try:
+            fam, size = ic.split(".", 2)[1:]
+        except ValueError:
+            fam, size = ic[3:], ""
+        fam_low = fam.lower()
+        fallback_map = {
+            "m7i": "m6i",
+            "r7i": "r6i",
+            "m7g": "m6i",
+            "r7g": "r6i",
+        }
+        fallback_fam = fallback_map.get(fam_low)
+        if fallback_fam is None and fam_low.startswith("c"):
+            fallback_fam = "m6i"
+        if fallback_fam:
+            ic2 = f"db.{fallback_fam}.{size}" if size else f"db.{fallback_fam}"
+            price = _try(ic2)
+            if price is not None:
+                return price
+
     return None
+
+
+
 # --- Add anywhere below your JSON helpers (e.g., near other monthly_* fns) ---
 from pathlib import Path
 

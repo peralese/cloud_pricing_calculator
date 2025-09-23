@@ -468,7 +468,8 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
 @click.option("--no-monthly", is_flag=True, help="Write only price_per_hour, skip monthly breakdown.")
 @click.option("--refresh-azure-prices", is_flag=True, help="Refresh Azure Retail Prices cache before pricing (if supported).")
 @click.option("--output", "output_path", default=None, help="Output file path (CSV/Excel).")
-def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_monthly, refresh_azure_prices, output_path):
+@click.option("--no-auto-recommend", is_flag=True, default=False, help="Disable automatic recommendation for missing required fields; fail instead.")
+def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_monthly, refresh_azure_prices, output_path, no_auto_recommend):
     """
     Price the recommendation output. Enforces single-cloud file matching the --cloud argument.
     """
@@ -505,6 +506,125 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 f"❌ This price run is for '--cloud {expected_cloud}', but the file contains cloud={human}. "
                 "Price with the matching --cloud or re-run 'recommend' for a single cloud."
             )
+
+    # --- Read and validate rows ---
+    rows = read_rows(str(rec_path), sheet=None)
+    if not rows:
+        raise SystemExit("❌ Input file has no rows.")
+
+    # Auto-recommend missing fields unless --no-auto-recommend
+    if not no_auto_recommend:
+        def needs_reco(r: dict) -> bool:
+            cloud_lc = (r.get("cloud") or expected_cloud).strip().lower()
+            engine = (r.get("db_engine") or "").strip().lower()
+            # If we expect to price RDS SQL Server, we need db_instance_class & storage and license_included
+            if cloud_lc == "aws" and ("sql" in engine and "server" in engine):
+                if not r.get("db_instance_class"):
+                    return True
+                if not r.get("db_storage_gb"):
+                    return True
+                lic = (r.get("license_model") or "").strip().lower()
+                if lic and lic not in {"license_included", "license-included"}:
+                    return True
+            # Also, for regular VM compute pricing we need an instance type
+            itype = r.get("recommended_instance_type") or r.get("instance_type")
+            if not itype:
+                return True
+            return False
+
+        mask = [needs_reco(r) for r in rows]
+        if any(mask):
+            import pandas as _pd
+            from recommender import (
+                infer_profile, fetch_instance_catalog, pick_instance,
+                fetch_azure_vm_catalog, pick_azure_size, normalize_azure_region
+            )
+
+            df = _pd.DataFrame(rows)
+            default_cloud = expected_cloud
+
+            # Only recommend for the subset that needs it
+            to_fix = df[_pd.Series(mask)].copy()
+
+            if default_cloud == "aws":
+                # Determine a fallback region from CLI or any non-empty row value
+                fallback_region = region or next(
+                    (str(r.get("region")).strip() for r in rows if str(r.get("region") or "").strip()),
+                    None,
+                )
+
+                # Get the region series if present; do NOT truth-test the Series
+                reg_series = to_fix["region"] if "region" in to_fix.columns else _pd.Series([], index=to_fix.index)
+
+                # First non-empty region in the subset, else fallback_region
+                non_empty = (
+                    reg_series.astype(str)
+                    .str.strip()
+                    .replace({"": _pd.NA})
+                    .dropna()
+                )
+                aws_region = (non_empty.iloc[0] if not non_empty.empty else fallback_region)
+
+                if not aws_region:
+                    raise SystemExit("AWS region required for auto-recommend. Use --region or provide per-row.")
+
+                cat = fetch_instance_catalog(str(aws_region))
+
+
+                def _reco_row(r):
+                    vcpu = int(float(r.get("vcpu", 0)))
+                    mem  = float(r.get("memory_gib", 0.0))
+                    prof = (str(r.get("profile") or "").strip().lower()) or infer_profile(vcpu, mem)
+                    chosen = pick_instance(cat, prof, vcpu, mem)
+                    r["recommended_instance_type"] = chosen["instanceType"] if chosen else r.get("recommended_instance_type","")
+                    # For RDS SQL Server, if class missing, reuse instance type as class fallback when sensible
+                    eng = (str(r.get("db_engine") or "")).strip().lower()
+                    if eng and not r.get("db_instance_class") and chosen:
+                        it = chosen["instanceType"]
+                        r["db_instance_class"] = it if it.startswith("db.") else f"db.{it}"
+                    return r
+
+                to_fix = to_fix.apply(_reco_row, axis=1)
+
+            else:  # azure
+                def _reco_row(r):
+                    vcpu = int(float(r.get("vcpu", 0)))
+                    mem  = float(r.get("memory_gib", 0.0))
+                    azr  = normalize_azure_region(r.get("region") or "eastus")
+                    cat  = fetch_azure_vm_catalog(azr)
+                    chosen = pick_azure_size(cat, vcpu, mem)
+                    r["region"] = azr
+                    r["recommended_instance_type"] = chosen["instanceType"] if chosen else r.get("recommended_instance_type","")
+                    return r
+
+                to_fix = to_fix.apply(_reco_row, axis=1)
+
+            # Merge back only the columns we set
+            for i, need in enumerate(mask):
+                if need:
+                    rows[i].update({k: v for k, v in to_fix.iloc[0].to_dict().items() if k in {
+                        "recommended_instance_type", "db_instance_class", "region"
+                    }})
+                    to_fix = to_fix.iloc[1:]  # consume one
+
+    else:
+        # Strict mode: fail fast if required bits are missing
+        bad = []
+        for r in rows:
+            itype = r.get("recommended_instance_type") or r.get("instance_type")
+            dbeng = (r.get("db_engine") or "").lower()
+            lic   = (r.get("license_model") or "").lower()
+            if not itype:
+                bad.append(("missing instance_type/recommended_instance_type", r.get("id","")))
+            if "sql" in dbeng and "server" in dbeng:
+                if not r.get("db_instance_class"):
+                    bad.append(("missing db_instance_class for RDS SQL Server", r.get("id","")))
+                if lic and lic not in {"license_included","license-included"}:
+                    bad.append(("RDS SQL Server requires license_included", r.get("id","")))
+        if bad:
+            msg = "\n".join(f"- {why} (row id: {rid})" for why, rid in bad)
+            raise SystemExit("Strict mode (--no-auto-recommend) failed:\n" + msg)
+
 
     # --- Pricing loop ---
     out_rows: List[dict] = []
@@ -558,18 +678,54 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
             r["monthly_s3_usd"] = f"{monthly_s3_cost(s3_gb):.2f}"
             r["monthly_network_usd"] = f"{monthly_network_cost(net_prof):.2f}"
 
+            def _normalize_rds_class(cls: str) -> str:
+                cls = str(cls or "").strip()
+                return cls if cls.startswith("db.") else (f"db.{cls}" if cls else cls)
+
             # ----- Database monthly cost -----
-            if row_cloud == "aws":
-                db_engine = (r.get("db_engine") or "").strip()
-                db_class = (r.get("db_instance_class") or "").strip()
-                db_multi_az = as_bool(r.get("multi_az"), False)
-                if db_engine and db_class and region_row:
-                    db_monthly = monthly_rds_cost(db_engine, db_class, str(region_row), license_model, db_multi_az, hours)
-                else:
-                    db_monthly = 0.0
+            # --- inside the AWS DB monthly cost block in main.py ---
+            db_engine = (r.get("db_engine") or "").strip()
+            db_class = (r.get("db_instance_class") or "").strip()
+            db_multi_az = as_bool(r.get("multi_az"), False)
+
+            # Write what we resolved so you can see it in the “All” tab
+            if db_class:
+                r["resolved_db_instance_class"] = db_class
+            elif db_engine:
+                r["resolved_db_instance_class"] = ""  # explicit blank
+
+            # If db_instance_class is missing, try to derive from recommended/compute type
+            if db_engine and not db_class:
+                candidate = (r.get("recommended_instance_type") or r.get("instance_type") or "").strip()
+                if candidate:
+                    # strip leading "db." if someone already provided it
+                    cand = candidate[3:] if candidate.startswith("db.") else candidate
+                    fam, _, size = cand.partition(".")
+                    eng_l = db_engine.lower()
+                    fam_l = fam.lower()
+
+                    # 1) General fallback: map compute-only families to closest RDS families
+                    #    This helps Postgres/MySQL too (not just SQL Server).
+                    general_fallback = {
+                        "c7i": "m7i", "c7g": "m7g",
+                        "c6i": "m6i", "c6g": "m6g",
+                        "c5": "m5",   "c5n": "m5", "c4": "m4",
+                    }
+                    fam2 = general_fallback.get(fam_l, fam)
+
+                    # 2) SQL Server special fallback (some 7-series aren’t offered yet)
+                    if "sql" in eng_l and "server" in eng_l:
+                        down = {"m7i":"m6i", "r7i":"r6i", "m7g":"m6i", "r7g":"r6i"}
+                        fam2 = down.get(fam2.lower(), ("m6i" if fam2.lower().startswith("c") else fam2))
+
+                    db_class = f"db.{fam2}.{size}" if size else f"db.{fam2}"
+
+            # Final guard: only attempt pricing when we have engine, class and region
+            if db_engine and db_class and region_row:
+                db_monthly = monthly_rds_cost(db_engine, db_class, str(region_row), license_model, db_multi_az, hours)
             else:
-                # Azure: sum SQL DB/MI (includes backup/storage per model) + Cosmos DB
                 db_monthly = 0.0
+
 
                 # Azure SQL DB/Managed Instance (Option B)
                 def _first(*names):
