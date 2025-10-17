@@ -88,10 +88,31 @@ AWS_PRICING_REGION=us-east-1
   - `price_per_hour_usd`, `monthly_compute_usd`, `monthly_ebs_usd`, `monthly_db_usd`, `monthly_total_usd`
   - `resolved_db_instance_class` (new)
   - optional `pricing_note` if you enable diagnostics in code
-- `output/YYYY-MM-DD/HHMMSS/price.xlsx` — workbook with tabs:
+- `output/YYYY-MM-DD/HHMMSS/price.xlsx` - workbook with tabs:
   - **ExecutiveSummary** (roll-ups for EC2/VM, EBS, RDS, etc.)
   - **All** (full row data)
   - **Development**, **Production**, **Summary**, **Baseline** (as applicable)
+
+---
+
+**Baseline (AWS VPC) Costs**
+- Components: `TGW Attachment`, `TGW Data`, `Interface Endpoint`, `Interface Endpoint Data`, `GitRunner EC2`, `GitRunner EBS (OS)`, `Terraform Backend S3`, and `TOTAL`.
+- Default rates (USD):
+  - Networking: `tgw_attachment_hourly=0.06` $/attachment-hour, `tgw_data_gb=0.02` $/GB, `vpce_if_hourly=0.01` $/endpoint-hour, `vpce_data_gb=0.01` $/GB.
+  - Storage: `ebs_gp3_gb_month=0.08`, `s3_std_gb_month=0.023` (reused from pricing constants). All configurable via env vars. Per-region networking overrides supported via `prices/aws_vpc_baseline.json`.
+- Hours per month: `730`.
+- Formulas:
+  - TGW attachments: `tgw_attachments * tgw_attachment_hourly * hours_per_month`
+  - TGW data: `tgw_data_gb * tgw_data_gb_rate`
+  - Interface endpoints: `(vpce_base_per_az + vpce_extra_per_az) * vpce_azs * vpce_if_hourly * hours_per_month`
+  - Interface endpoint data: `vpce_data_gb * vpce_data_gb_rate`
+  - GitRunner EC2 (Linux On-Demand): `gitrunner_count * ec2_price_per_hour(instance_type, region) * hours_per_month`.
+    - Pricing sourced via AWS Pricing API; fallback override: set `GITRUNNER_HOURLY`.
+  - GitRunner EBS (OS): `gitrunner_count * gitrunner_os_gb * ebs_gp3_gb_month`
+  - Terraform Backend S3: `tf_backend_s3_gb * s3_std_gb_month`
+- Prompt defaults: `tgw_attachments=1`, `tgw_data_gb=100`, `vpce_base_per_az=8`, `vpce_extra_per_az=0`, `vpce_azs=2`, `vpce_data_gb` defaults to `tgw_data_gb`, `gitrunner_instance_type=t3.medium`, `gitrunner_count=1`, `gitrunner_os_gb=256`, `tf_backend_s3_gb=1`.
+- Example (networking defaults only, region-agnostic): TGW attach `1*0.06*730=43.80`, TGW data `100*0.02=2.00`, VPCE attach `16*0.01*730=116.80`, VPCE data `100*0.01=1.00` → subtotal `163.60`. Add GitRunner EC2/EBS and Terraform S3 per formulas above (EC2 hourly varies by region).
+- How to run: `python main.py baseline --cloud aws` (writes `baseline.csv` to the current run folder). Summary roll‑up includes baseline total when present.
 
 ---
 

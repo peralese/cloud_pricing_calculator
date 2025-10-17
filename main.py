@@ -454,6 +454,44 @@ def recommend_cmd(in_path, cloud, region, strict, validator_report_path, output_
         except Exception as e:
             click.echo(f"⚠️ Summary generation failed: {e}", err=True)
 
+# ---------------------- validate ----------------------
+@cli.command(name="validate")
+@click.option("--in", "in_path", required=True, help="Input CSV/Excel file.")
+@click.option("--output", "output_path", default=None, help="Output path for validator report CSV.")
+@click.option("--strict", is_flag=True, help="Fail (non-zero) if any row is rec_only or error.")
+def validate_cmd(in_path, output_path, strict):
+    """
+    Validate input rows and write a validator report CSV. Does not recommend or price.
+    """
+    in_path = Path(in_path)
+    if not in_path.exists():
+        click.echo(f"ERROR: Input file not found: {in_path}", err=True)
+        sys.exit(2)
+
+    # Load input (first sheet by default for Excel)
+    if in_path.suffix.lower() in {".xlsx", ".xls"}:
+        df = pd.read_excel(in_path)
+    else:
+        df = pd.read_csv(in_path)
+
+    # Validate (no defaults; report-only)
+    ok_idx, rec_only_idx, error_idx, report_rows = validate_dataframe(df, input_file=str(in_path))
+
+    # Choose report output path (timestamped folder if not provided)
+    _, rep_out_path = _default_paths_for_recommend(None, output_path)
+    write_validator_report(report_rows, str(rep_out_path))
+
+    total = len(df)
+    click.echo(f"Validation: rows={total} | ok={len(ok_idx)} | rec_only={len(rec_only_idx)} | error={len(error_idx)}")
+    click.echo(f"Wrote validator report -> {rep_out_path}")
+
+    if strict and (len(error_idx) > 0 or len(rec_only_idx) > 0):
+        click.echo(
+            "Strict mode: failing due to rows that block recommendation or pricing.",
+            err=True,
+        )
+        sys.exit(2)
+
 # ---------------------- price ----------------------
 @cli.command(name="price")
 @click.option("--cloud", type=click.Choice(["aws", "azure"], case_sensitive=False), required=True,
