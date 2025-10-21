@@ -530,6 +530,26 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
     # --- Decide price output path (same run folder as recommend if possible) ---
     price_out_path = _default_path_for_price(rec_path, output_path)
 
+    # --- AWS baseline (optional, auto-prompt) ---
+    # If we're pricing AWS and the current run folder does not have a baseline.csv,
+    # prompt the user for baseline inputs and write it alongside price output.
+    # This restores the previous interactive flow the user expected.
+    try:
+        run_dir = price_out_path.parent
+        baseline_here = run_dir / "baseline.csv"
+        if expected_cloud == "aws" and not baseline_here.exists():
+            if baseline_prompt and baseline_rates and compute_baseline and write_baseline_csv:
+                click.echo("Collecting AWS baseline inputs (TGW, VPC endpoints, GitRunner, S3)...")
+                b_inputs = baseline_prompt()
+                b_rates = baseline_rates(b_inputs.region)
+                b_rows, _ = compute_baseline(b_inputs, b_rates)
+                b_out = write_baseline_csv(run_dir, b_rows)
+                click.echo(f"Wrote baseline -> {b_out}")
+            else:
+                click.echo("Baseline module unavailable; skipping baseline prompts.")
+    except Exception as e:
+        click.echo(f"?? Baseline prompt skipped: {e}")
+
     # --- Read and validate rows ---
     rows = read_rows(str(rec_path), sheet=None)
     if not rows:
