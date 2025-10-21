@@ -1,0 +1,15 @@
+# Core CLI and data processing
+click>=8.1.3
+pandas>=2.0.0
+
+# Excel read/write engines used by pandas
+openpyxl>=3.1.0     # reading .xlsx
+XlsxWriter>=3.1.0   # writing .xlsx with formatting
+
+# AWS and HTTP
+boto3>=1.28.0
+requests>=2.31.0
+
+# Optional: enable Azure SDK sizing (otherwise CLI fallback is used)
+# azure-identity>=1.15.0
+# azure-mgmt-compute>=30.0.0
