@@ -15,6 +15,51 @@ A Python 3.10+ CLI that validates inputs, recommends instance types, and produce
 
 ---
 
+## 🔹 Update: Global Tracking Sheet Integration (October 2025)
+
+A new **interactive global tracking sheet** (`output/tracking.xlsx`) is now created and updated after every pricing run.
+
+### 🧭 How It Works
+
+After each successful `price` run, the CLI asks if you want to add the results to a global tracking sheet that aggregates all pricing runs across applications.
+
+Example flow:
+
+```text
+✅  Price calculation complete.
+
+➕ Add this run to tracking sheet? (y/N): y
+🏷️  What is the Application Name?: PayrollApp
+⚠️  An entry for "PayrollApp" already exists.
+Overwrite existing entry? (y/N): y
+🧾  What is the ESATS ID?: ESATS-9921
+🔢  What is the ECS #?: ECS-56789
+✅  Tracking sheet updated successfully → output/tracking.xlsx
+```
+
+### 📊 Tracking Sheet Columns
+
+| Column | Description | Auto-Filled |
+|:--|:--|:--:|
+| Application Name | User-entered; overwrite check by name | 🟢 |
+| ESATS ID | User-entered | 🔴 |
+| ECS# | User-entered | 🔴 |
+| Linux VMs (generic) | Count of Linux compute servers (non-DB) | 🟢 |
+| Windows VMs | Count of Windows compute servers (non-DB) | 🟢 |
+| Block Storage (EBS/Managed Disk) | Monthly $ total | 🟢 |
+| Network (egress/DTO) | Monthly $ total | 🟢 |
+| AWS VPC Overhead (baseline) | Monthly baseline $ | 🟢 |
+| Previously Hosted | Reserved / blank | 🔴 |
+| Savings Due to Modernization | Reserved / blank | 🔴 |
+
+🟢 = calculated automatically  
+🔴 = user-provided or left blank
+
+If an **Application Name** already exists in the tracking sheet, you’ll be prompted whether to overwrite the existing entry.  
+The tracking sheet is created automatically if it doesn’t exist.
+
+---
+
 ## Quickstart
 
 ```bash
