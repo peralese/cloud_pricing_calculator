@@ -270,12 +270,14 @@ def _load_tracking_df(path: Path, sheet: str = "Tracking") -> pd.DataFrame:
         "AWS VPC Overhead (Baseline)",
         "Previously Hosted",
         "Savings Due to Modernization",
-        "Run Folder",
     ]
     if not path.exists():
         return pd.DataFrame(columns=TRACKING_COLUMNS)
     try:
         df = pd.read_excel(path, sheet_name=sheet)
+        # Drop legacy column no longer needed
+        if "Run Folder" in df.columns:
+            df = df.drop(columns=["Run Folder"], errors="ignore")
         # Ensure new columns exist; keep any existing extra columns to avoid data loss
         for c in TRACKING_COLUMNS:
             if c not in df.columns:
@@ -429,7 +431,6 @@ def prompt_and_update_tracking(run_dir: Path) -> None:
             "AWS VPC Overhead (Baseline)": roll["baseline"],
             "Previously Hosted": "",
             "Savings Due to Modernization": "",
-            "Run Folder": str(run_dir),
         }
 
         if df.empty:
@@ -450,6 +451,9 @@ def prompt_and_update_tracking(run_dir: Path) -> None:
                         df[k] = None
                 out_df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
 
+        # Ensure legacy column is not written back
+        if "Run Folder" in out_df.columns:
+            out_df = out_df.drop(columns=["Run Folder"], errors="ignore")
         _write_tracking_df_with_retry(tracking_path, out_df, sheet)
         click.echo(f"Updated tracking workbook → {tracking_path}")
     except Exception as e:

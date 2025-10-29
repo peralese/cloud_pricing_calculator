@@ -46,7 +46,6 @@ The sheet `Tracking` contains one row per application. Fields populated after ea
 - `AWS VPC Overhead (Baseline)` (auto; monthly baseline from `baseline.csv`, if present)
 - `Previously Hosted` (blank)
 - `Savings Due to Modernization` (blank)
-- `Run Folder` (auto; path to the run directory)
 
 Additional details:
 - Idempotent upsert keyed by Application Name (case-insensitive). If the app exists, you’ll be asked to confirm overwrite.
