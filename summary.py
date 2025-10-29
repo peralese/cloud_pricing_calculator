@@ -259,29 +259,33 @@ def write_run_summary(run_dir: Path, recommend_path: Optional[Path], price_path:
 
 # ---------------------- Global tracking (interactive) ----------------------
 def _load_tracking_df(path: Path, sheet: str = "Tracking") -> pd.DataFrame:
+    TRACKING_COLUMNS = [
+        "Application Name",
+        "ESATS ID",
+        "ECS #",
+        "Linux VM (Generic)",
+        "Windows VMs",
+        "Block Storage (EBS/Managed Disk)",
+        "Network (egress/DTO)",
+        "AWS VPC Overhead (Baseline)",
+        "Previously Hosted",
+        "Savings Due to Modernization",
+        "Run Folder",
+    ]
     if not path.exists():
-        return pd.DataFrame(columns=[
-            "Application Name", "ESATS ID", "ECS #",
-            "Linux VMs", "Windows VMs",
-            "Monthly Baseline USD",
-            "Monthly Compute+Storage+Network+DB USD",
-            "Monthly Grand Total USD",
-            "Annualized Grand Total USD",
-            "Run Folder",
-        ])
+        return pd.DataFrame(columns=TRACKING_COLUMNS)
     try:
-        return pd.read_excel(path, sheet_name=sheet)
+        df = pd.read_excel(path, sheet_name=sheet)
+        # Ensure new columns exist; keep any existing extra columns to avoid data loss
+        for c in TRACKING_COLUMNS:
+            if c not in df.columns:
+                df[c] = None
+        # Reorder with the preferred schema first
+        others = [c for c in df.columns if c not in TRACKING_COLUMNS]
+        return df[TRACKING_COLUMNS + others]
     except Exception:
         # Workbook exists but sheet missing → return empty with columns
-        return pd.DataFrame(columns=[
-            "Application Name", "ESATS ID", "ECS #",
-            "Linux VMs", "Windows VMs",
-            "Monthly Baseline USD",
-            "Monthly Compute+Storage+Network+DB USD",
-            "Monthly Grand Total USD",
-            "Annualized Grand Total USD",
-            "Run Folder",
-        ])
+        return pd.DataFrame(columns=TRACKING_COLUMNS)
 
 
 def _write_tracking_df_with_retry(path: Path, df: pd.DataFrame, sheet: str = "Tracking", retries: int = 5, delay_s: float = 0.5) -> None:
@@ -323,35 +327,52 @@ def _count_os(price_df: Optional[pd.DataFrame]) -> Tuple[int, int]:
     return lin + unk, win
 
 
-def _compute_run_rollups(run_dir: Path) -> Dict[str, float | int]:
+def _exec_buckets_from_price_df(price_df: Optional[pd.DataFrame]) -> Dict[str, float]:
+    """Derive Executive Summary-like buckets from detail rows.
+
+    Returns monthly sums for:
+    - linux_generic
+    - windows
+    - block_storage
+    - network
+    """
+    if price_df is None or price_df.empty:
+        return {"linux_generic": 0.0, "windows": 0.0, "block_storage": 0.0, "network": 0.0}
+
+    df = price_df.copy()
+    df["os"] = df.get("os", pd.Series([""] * len(df))).astype(str).str.strip().str.lower()
+    for c in ["monthly_compute_usd", "monthly_ebs_usd", "monthly_network_usd"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        else:
+            df[c] = 0.0
+
+    linux_generic = float(df.loc[df["os"] == "linux", "monthly_compute_usd"].sum())
+    windows = float(df.loc[df["os"] == "windows", "monthly_compute_usd"].sum())
+    block_storage = float(df["monthly_ebs_usd"].sum())
+    network = float(df["monthly_network_usd"].sum())
+
+    return {
+        "linux_generic": round(linux_generic, 2),
+        "windows": round(windows, 2),
+        "block_storage": round(block_storage, 2),
+        "network": round(network, 2),
+    }
+
+
+def _compute_run_rollups(run_dir: Path) -> Dict[str, float]:
     arts = _detect_artifacts(run_dir, None, None)
     price_df = _load_table(arts.price_path)
 
-    # Roll-ups from priced rows
-    linux_count, windows_count = _count_os(price_df)
-
-    if price_df is None:
-        price_total = 0.0
-    else:
-        # Use the same coercion as summary
-        col = "monthly_total_usd"
-        if col in price_df.columns:
-            price_df[col] = pd.to_numeric(price_df[col], errors="coerce").fillna(0.0)
-            price_total = float(price_df[col].sum())
-        else:
-            price_total = 0.0
-
+    buckets = _exec_buckets_from_price_df(price_df)
     baseline_total = _sum_baseline(run_dir)
-    grand_total = price_total + baseline_total
-    annual_total = grand_total * 12.0
 
     return {
-        "linux_vms": int(linux_count),
-        "windows_vms": int(windows_count),
-        "monthly_baseline_usd": round(baseline_total, 2),
-        "monthly_all_services_usd": round(price_total, 2),
-        "monthly_grand_total_usd": round(grand_total, 2),
-        "annualized_grand_total_usd": round(annual_total, 2),
+        "linux_generic": buckets["linux_generic"],
+        "windows": buckets["windows"],
+        "block_storage": buckets["block_storage"],
+        "network": buckets["network"],
+        "baseline": round(baseline_total, 2),
     }
 
 
@@ -401,12 +422,13 @@ def prompt_and_update_tracking(run_dir: Path) -> None:
             "Application Name": app_name,
             "ESATS ID": esats_id,
             "ECS #": ecs_no,
-            "Linux VMs": roll["linux_vms"],
-            "Windows VMs": roll["windows_vms"],
-            "Monthly Baseline USD": roll["monthly_baseline_usd"],
-            "Monthly Compute+Storage+Network+DB USD": roll["monthly_all_services_usd"],
-            "Monthly Grand Total USD": roll["monthly_grand_total_usd"],
-            "Annualized Grand Total USD": roll["annualized_grand_total_usd"],
+            "Linux VM (Generic)": roll["linux_generic"],
+            "Windows VMs": roll["windows"],
+            "Block Storage (EBS/Managed Disk)": roll["block_storage"],
+            "Network (egress/DTO)": roll["network"],
+            "AWS VPC Overhead (Baseline)": roll["baseline"],
+            "Previously Hosted": "",
+            "Savings Due to Modernization": "",
             "Run Folder": str(run_dir),
         }
 

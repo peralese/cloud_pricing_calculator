@@ -34,18 +34,19 @@ Updated tracking workbook → output/tracking.xlsx
 
 ### 📊 Tracked Columns
 
-The sheet `Tracking` contains one row per application. These fields are written or updated:
+The sheet `Tracking` contains one row per application. Fields populated after each pricing run:
 
-- Application Name (prompt)
-- ESATS ID (prompt)
-- ECS # (prompt)
-- Linux VMs (auto)
-- Windows VMs (auto)
-- Monthly Baseline USD (auto; from `baseline.csv` if present in the same run folder)
-- Monthly Compute+Storage+Network+DB USD (auto; sum of `monthly_total_usd` from the priced rows)
-- Monthly Grand Total USD (auto; baseline + priced totals)
-- Annualized Grand Total USD (auto; 12 × monthly grand total)
-- Run Folder (auto; path to the current run directory)
+- `Application Name` (prompt)
+- `ESATS ID` (prompt)
+- `ECS #` (prompt)
+- `Linux VM (Generic)` (auto; monthly cost from exec summary → sum of `monthly_compute_usd` where `os == 'linux'`)
+- `Windows VMs` (auto; monthly cost from exec summary → sum of `monthly_compute_usd` where `os == 'windows'`)
+- `Block Storage (EBS/Managed Disk)` (auto; monthly cost → sum of `monthly_ebs_usd`)
+- `Network (egress/DTO)` (auto; monthly cost → sum of `monthly_network_usd`)
+- `AWS VPC Overhead (Baseline)` (auto; monthly baseline from `baseline.csv`, if present)
+- `Previously Hosted` (blank)
+- `Savings Due to Modernization` (blank)
+- `Run Folder` (auto; path to the run directory)
 
 Additional details:
 - Idempotent upsert keyed by Application Name (case-insensitive). If the app exists, you’ll be asked to confirm overwrite.
