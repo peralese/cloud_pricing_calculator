@@ -17,46 +17,40 @@ A Python 3.10+ CLI that validates inputs, recommends instance types, and produce
 
 ## 🔹 Update: Global Tracking Sheet Integration (October 2025)
 
-A new **interactive global tracking sheet** (`output/tracking.xlsx`) is now created and updated after every pricing run.
+A new interactive global tracking workbook (`output/tracking.xlsx`) can capture key results from each pricing run.
 
-### 🧭 How It Works
+### 🧭 Flow
 
-After each successful `price` run, the CLI asks if you want to add the results to a global tracking sheet that aggregates all pricing runs across applications.
-
-Example flow:
+After a successful `price` run, you’ll be prompted to add results to the global tracker:
 
 ```text
-✅  Price calculation complete.
-
-➕ Add this run to tracking sheet? (y/N): y
-🏷️  What is the Application Name?: PayrollApp
-⚠️  An entry for "PayrollApp" already exists.
-Overwrite existing entry? (y/N): y
-🧾  What is the ESATS ID?: ESATS-9921
-🔢  What is the ECS #?: ECS-56789
-✅  Tracking sheet updated successfully → output/tracking.xlsx
+Add results to global tracking sheet? (y/n): y
+What is the Application Name?: PayrollApp
+App already exists — overwrite entry? (y/n): y
+What is the ESATS ID?: ESATS-9921
+What is the ECS #: ECS-56789
+Updated tracking workbook → output/tracking.xlsx
 ```
 
-### 📊 Tracking Sheet Columns
+### 📊 Tracked Columns
 
-| Column | Description | Auto-Filled |
-|:--|:--|:--:|
-| Application Name | User-entered; overwrite check by name | 🟢 |
-| ESATS ID | User-entered | 🔴 |
-| ECS# | User-entered | 🔴 |
-| Linux VMs (generic) | Count of Linux compute servers (non-DB) | 🟢 |
-| Windows VMs | Count of Windows compute servers (non-DB) | 🟢 |
-| Block Storage (EBS/Managed Disk) | Monthly $ total | 🟢 |
-| Network (egress/DTO) | Monthly $ total | 🟢 |
-| AWS VPC Overhead (baseline) | Monthly baseline $ | 🟢 |
-| Previously Hosted | Reserved / blank | 🔴 |
-| Savings Due to Modernization | Reserved / blank | 🔴 |
+The sheet `Tracking` contains one row per application. These fields are written or updated:
 
-🟢 = calculated automatically  
-🔴 = user-provided or left blank
+- Application Name (prompt)
+- ESATS ID (prompt)
+- ECS # (prompt)
+- Linux VMs (auto)
+- Windows VMs (auto)
+- Monthly Baseline USD (auto; from `baseline.csv` if present in the same run folder)
+- Monthly Compute+Storage+Network+DB USD (auto; sum of `monthly_total_usd` from the priced rows)
+- Monthly Grand Total USD (auto; baseline + priced totals)
+- Annualized Grand Total USD (auto; 12 × monthly grand total)
+- Run Folder (auto; path to the current run directory)
 
-If an **Application Name** already exists in the tracking sheet, you’ll be prompted whether to overwrite the existing entry.  
-The tracking sheet is created automatically if it doesn’t exist.
+Additional details:
+- Idempotent upsert keyed by Application Name (case-insensitive). If the app exists, you’ll be asked to confirm overwrite.
+- The workbook and sheet are created if missing. Writes use a safe replace mode and retry briefly if the file is locked.
+- The `os` column is preserved in pricing output, enabling accurate Linux/Windows counts.
 
 ---
 

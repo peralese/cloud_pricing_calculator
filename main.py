@@ -10,9 +10,10 @@ import click
 import pandas as pd
 
 try:
-    from summary import write_run_summary
+    from summary import write_run_summary, prompt_and_update_tracking
 except ImportError:
     write_run_summary = None
+    prompt_and_update_tracking = None  # type: ignore
 
 # ---------------------- Imports from local modules ----------------------
 from validator import (
@@ -715,6 +716,9 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
                 r["pricing_note"] = r.get("pricing_note", "") if compute_price is not None else \
                     "No EC2 price found (check filters/region/OS)"
 
+        # Persist OS for downstream reporting
+        r["os"] = os_row
+
         # Monthly math
         hours = float(hours_per_month)
         compute_monthly = monthly_compute_cost(compute_price, hours)
@@ -874,6 +878,14 @@ def price_cmd(cloud, in_path, latest, region, os_name, hours_per_month, no_month
             write_run_summary(run_dir, None, out_path)
         except Exception as e:
             print(f"⚠️ Summary generation failed: {e}")
+
+    # After summary, interactively prompt to add to tracking.xlsx
+    if prompt_and_update_tracking:
+        try:
+            run_dir = Path(out_path).parent
+            prompt_and_update_tracking(run_dir)
+        except Exception as e:
+            print(f"⚠️ Tracking prompt failed: {e}")
 
 # ---------------------- Excel output helpers ----------------------
 def _sanitize_sheet_name(name: str) -> str:

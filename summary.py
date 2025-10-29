@@ -8,6 +8,12 @@ from typing import Optional, Dict, Any, Tuple, List
 from glob import glob
 
 import pandas as pd
+import time
+
+try:
+    import click  # For interactive prompts
+except Exception:
+    click = None  # type: ignore
 
 
 @dataclass
@@ -249,4 +255,180 @@ def write_run_summary(run_dir: Path, recommend_path: Optional[Path], price_path:
     except Exception:
         # Silent best-effort; callers shouldn't fail a run due to summary issues
         return
+
+
+# ---------------------- Global tracking (interactive) ----------------------
+def _load_tracking_df(path: Path, sheet: str = "Tracking") -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=[
+            "Application Name", "ESATS ID", "ECS #",
+            "Linux VMs", "Windows VMs",
+            "Monthly Baseline USD",
+            "Monthly Compute+Storage+Network+DB USD",
+            "Monthly Grand Total USD",
+            "Annualized Grand Total USD",
+            "Run Folder",
+        ])
+    try:
+        return pd.read_excel(path, sheet_name=sheet)
+    except Exception:
+        # Workbook exists but sheet missing → return empty with columns
+        return pd.DataFrame(columns=[
+            "Application Name", "ESATS ID", "ECS #",
+            "Linux VMs", "Windows VMs",
+            "Monthly Baseline USD",
+            "Monthly Compute+Storage+Network+DB USD",
+            "Monthly Grand Total USD",
+            "Annualized Grand Total USD",
+            "Run Folder",
+        ])
+
+
+def _write_tracking_df_with_retry(path: Path, df: pd.DataFrame, sheet: str = "Tracking", retries: int = 5, delay_s: float = 0.5) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    last_err: Optional[Exception] = None
+    for _ in range(max(1, retries)):
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl", mode=("a" if path.exists() else "w"), if_sheet_exists="replace") as writer:
+                df.to_excel(writer, index=False, sheet_name=sheet)
+            return
+        except Exception as e:
+            # In case the file is temporarily locked by Excel/another process
+            last_err = e
+            time.sleep(delay_s)
+    if last_err:
+        raise last_err
+
+
+def _count_os(price_df: Optional[pd.DataFrame]) -> Tuple[int, int]:
+    if price_df is None or price_df.empty:
+        return 0, 0
+    ser = price_df.get("os")
+    if ser is None:
+        # No explicit OS column; best-effort: assume Linux if unstated
+        total = int(len(price_df))
+        return total, 0
+    s = ser.fillna("").astype(str).str.strip().str.lower()
+    win = int((s == "windows").sum())
+    # Treat Linux flavors as Linux
+    lin = int(((s == "linux") | (s == "rhel") | (s == "suse")).sum())
+    # Unknowns: count them as Linux to match pricing default behavior
+    unk = int((~((s == "windows") | (s == "linux") | (s == "rhel") | (s == "suse"))).sum())
+    return lin + unk, win
+
+
+def _compute_run_rollups(run_dir: Path) -> Dict[str, float | int]:
+    arts = _detect_artifacts(run_dir, None, None)
+    price_df = _load_table(arts.price_path)
+
+    # Roll-ups from priced rows
+    linux_count, windows_count = _count_os(price_df)
+
+    if price_df is None:
+        price_total = 0.0
+    else:
+        # Use the same coercion as summary
+        col = "monthly_total_usd"
+        if col in price_df.columns:
+            price_df[col] = pd.to_numeric(price_df[col], errors="coerce").fillna(0.0)
+            price_total = float(price_df[col].sum())
+        else:
+            price_total = 0.0
+
+    baseline_total = _sum_baseline(run_dir)
+    grand_total = price_total + baseline_total
+    annual_total = grand_total * 12.0
+
+    return {
+        "linux_vms": int(linux_count),
+        "windows_vms": int(windows_count),
+        "monthly_baseline_usd": round(baseline_total, 2),
+        "monthly_all_services_usd": round(price_total, 2),
+        "monthly_grand_total_usd": round(grand_total, 2),
+        "annualized_grand_total_usd": round(annual_total, 2),
+    }
+
+
+def prompt_and_update_tracking(run_dir: Path) -> None:
+    """Interactively prompt to add current run results to output/tracking.xlsx.
+
+    Asks user to confirm, then collects Application Name, ESATS ID, and ECS #,
+    auto-populates costs and counts from the run's priced output and baseline.
+    Idempotent update by Application Name; offers overwrite when name exists.
+    """
+    try:
+        if click is None:
+            return  # Non-interactive environment; skip silently
+
+        proceed = click.prompt("Add results to global tracking sheet? (y/n)", type=str, default="n").strip().lower()
+        if proceed not in {"y", "yes"}:
+            return
+
+        app_name = click.prompt("What is the Application Name?", type=str).strip()
+        if not app_name:
+            click.echo("Skipping: Application Name is required.")
+            return
+
+        tracking_path = Path("output") / "tracking.xlsx"
+        sheet = "Tracking"
+        df = _load_tracking_df(tracking_path, sheet)
+
+        # Case-insensitive match on Application Name
+        name_col = "Application Name"
+        existing_idx = None
+        if not df.empty and name_col in df.columns:
+            mask = df[name_col].fillna("").astype(str).str.strip().str.lower() == app_name.lower()
+            if mask.any():
+                existing_idx = int(mask[mask].index[0])
+                ow = click.prompt("App already exists — overwrite entry? (y/n)", type=str, default="n").strip().lower()
+                if ow not in {"y", "yes"}:
+                    click.echo("Keeping existing entry. No changes made.")
+                    return
+
+        esats_id = click.prompt("What is the ESATS ID?", type=str, default="").strip()
+        ecs_no = click.prompt("What is the ECS #?", type=str, default="").strip()
+
+        # Compute metrics from this run
+        roll = _compute_run_rollups(run_dir)
+
+        row = {
+            "Application Name": app_name,
+            "ESATS ID": esats_id,
+            "ECS #": ecs_no,
+            "Linux VMs": roll["linux_vms"],
+            "Windows VMs": roll["windows_vms"],
+            "Monthly Baseline USD": roll["monthly_baseline_usd"],
+            "Monthly Compute+Storage+Network+DB USD": roll["monthly_all_services_usd"],
+            "Monthly Grand Total USD": roll["monthly_grand_total_usd"],
+            "Annualized Grand Total USD": roll["annualized_grand_total_usd"],
+            "Run Folder": str(run_dir),
+        }
+
+        if df.empty:
+            out_df = pd.DataFrame([row])
+        else:
+            if name_col not in df.columns:
+                df[name_col] = ""
+            if existing_idx is not None and existing_idx in df.index:
+                for k, v in row.items():
+                    if k not in df.columns:
+                        df[k] = None
+                    df.at[existing_idx, k] = v
+                out_df = df
+            else:
+                # Append
+                for k in row.keys():
+                    if k not in df.columns:
+                        df[k] = None
+                out_df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+        _write_tracking_df_with_retry(tracking_path, out_df, sheet)
+        click.echo(f"Updated tracking workbook → {tracking_path}")
+    except Exception as e:
+        # Best-effort; never crash a pricing run over tracking issues
+        try:
+            if click is not None:
+                click.echo(f"⚠️ Tracking update skipped: {e}")
+        except Exception:
+            pass
 
