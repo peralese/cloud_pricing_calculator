@@ -150,6 +150,12 @@ AWS_PRICING_REGION=us-east-1
   - GitRunner EBS (OS): `gitrunner_count * gitrunner_os_gb * ebs_gp3_gb_month`
   - Terraform Backend S3: `tf_backend_s3_gb * s3_std_gb_month`
 - Prompt defaults: `tgw_attachments=1`, `tgw_data_gb=100`, `vpce_base_per_az=8`, `vpce_extra_per_az=0`, `vpce_azs=2`, `vpce_data_gb` defaults to `tgw_data_gb`, `gitrunner_instance_type=t3.medium`, `gitrunner_count=1`, `gitrunner_os_gb=256`, `tf_backend_s3_gb=1`.
+
+Enhancement: Number of Environments and dynamic VPCE default
+- Add a new prompt before VPCE questions: `Number of Environments?` (numeric input).
+- Use this value to compute the default for `Base Interface Endpoints per AZ (core services)` as `8 × <Number of Environments>`.
+  - Example: if Number of Environments = `2`, the default shown becomes `16`.
+- Users can still override this value; the computed number is only the suggested default.
 - Example (networking defaults only, region-agnostic): TGW attach `1*0.06*730=43.80`, TGW data `100*0.02=2.00`, VPCE attach `16*0.01*730=116.80`, VPCE data `100*0.01=1.00` → subtotal `163.60`. Add GitRunner EC2/EBS and Terraform S3 per formulas above (EC2 hourly varies by region).
 - How to run: `python main.py baseline --cloud aws` (writes `baseline.csv` to the current run folder). Summary roll‑up includes baseline total when present.
 
