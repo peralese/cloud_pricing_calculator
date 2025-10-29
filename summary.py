@@ -289,7 +289,13 @@ def _write_tracking_df_with_retry(path: Path, df: pd.DataFrame, sheet: str = "Tr
     last_err: Optional[Exception] = None
     for _ in range(max(1, retries)):
         try:
-            with pd.ExcelWriter(path, engine="openpyxl", mode=("a" if path.exists() else "w"), if_sheet_exists="replace") as writer:
+            # Only supply if_sheet_exists when appending; pandas raises if provided in write mode
+            writer_kwargs = {"engine": "openpyxl"}
+            if path.exists():
+                writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
+            else:
+                writer_kwargs.update({"mode": "w"})
+            with pd.ExcelWriter(path, **writer_kwargs) as writer:
                 df.to_excel(writer, index=False, sheet_name=sheet)
             return
         except Exception as e:
