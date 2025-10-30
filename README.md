@@ -89,6 +89,22 @@ Azure is similar: `--cloud azure` on `recommend` and `price`.
 
 ---
 
+## Project Structure
+
+- `main.py` — CLI entry point. Implements commands: `validate`, `recommend`, `price`, and `baseline`. Manages run folders under `output/YYYY-MM-DD/HHMMSS/`, writes CSV/XLSX, and invokes summaries and the interactive tracking prompt after pricing.
+- `summary.py` — Per-run summaries and global tracking. Exposes `write_run_summary(run_dir, ...)` to produce `summary.csv/json` (and append Summary sheets), and `prompt_and_update_tracking(run_dir)` to upsert rows in `output/tracking.xlsx`.
+- `baseline.py` — AWS VPC overhead baseline: interactive prompts (includes “Number of Environments?” → default 8× for Base Interface Endpoints per AZ), cost computation, and `baseline.csv` writer.
+- `pricing.py` — Pricing helpers: EC2/Azure VM hourly price lookups, monthly cost math (compute/storage/network), AWS RDS and Azure SQL pricing helpers, and CSV/Excel utilities.
+- `recommender.py` — Instance recommendation logic. AWS: fetches EC2 instance type catalog and picks best fit. Azure: fetches sizes via SDK/CLI with local caching.
+- `validator.py` — Input validation and report generation (`validator_report.csv`), plus region tables used by the CLI.
+- `azure_preflight.py` — Optional preflight checks for Azure (login/SDK availability).
+- `prices/` — Static price and configuration data (e.g., `aws_vpc_baseline.json` for regional baseline overrides).
+- `cache/` — Local caches (e.g., Azure VM sizes per region) to accelerate or enable offline use.
+- `Input/` — Your input spreadsheets/CSVs.
+- `output/` — Per-run artifacts (`recommend.csv`, `price.csv`, `price.xlsx`, `summary.csv/json`, `baseline.csv`), nested by date/time; also contains `tracking.xlsx`.
+- `requirements.txt` — Python dependencies (click, pandas, openpyxl, XlsxWriter, boto3, requests).
+
+
 ## Configuration
 
 Create a `.env` (or set real env vars):
@@ -248,7 +264,7 @@ make run   # example recommend/price command
 
 ## License
 
-MIT
+MIT — use, modify, and share.
 
 ---
 
