@@ -292,10 +292,11 @@ def prompt_for_inputs() -> BaselineInputs:
     tgw_attachments = click.prompt("Number of TGW attachments", type=int, default=1)
     tgw_data_gb = click.prompt("Estimated total TGW data processed per month (GB)", type=float, default=100.0)
 
-    # Enhancement: environments-driven default for base interface endpoints per AZ
+    # Environments-driven base interface endpoints per AZ (no confirmation prompt)
     num_envs = click.prompt("Number of Environments?", type=int, default=1)
-    base_ep_default = 8 * max(1, int(num_envs))
-    vpce_base_per_az = click.prompt("Base Interface Endpoints per AZ (core services)", type=int, default=base_ep_default)
+    base_ep = 8 * max(1, int(num_envs))
+    click.echo(f"Base Interface Endpoints per AZ (core services) set to {base_ep} (8 × {max(1, int(num_envs))}).")
+    vpce_base_per_az = base_ep
     vpce_extra_per_az = click.prompt("Extra Interface Endpoints per AZ (e.g., RDS, Backup)", type=int, default=0)
     vpce_azs = click.prompt("Number of AZs", type=int, default=2)
 

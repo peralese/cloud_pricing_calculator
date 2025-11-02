@@ -7,6 +7,7 @@ A Python 3.10+ CLI that validates inputs, recommends instance types, and produce
 ## ✅ Recent Changes
 
 - (Oct 2025) Global tracking workbook prompt after pricing, with upsert by Application Name and updated schema (Linux/Windows monthly, storage, network, baseline).
+- (Oct 2025) Baseline: base VPCE endpoints per AZ are now computed automatically as 8 x environments (no confirmation).
 - (Oct 2025) Baseline prompt now includes “Number of Environments?” and sets the default for “Base Interface Endpoints per AZ (core services)” to `8 × environments`.
 
 ### 2025‑09‑22
@@ -170,9 +171,12 @@ AWS_PRICING_REGION=us-east-1
     - Pricing sourced via AWS Pricing API; fallback override: set `GITRUNNER_HOURLY`.
   - GitRunner EBS (OS): `gitrunner_count * gitrunner_os_gb * ebs_gp3_gb_month`
   - Terraform Backend S3: `tf_backend_s3_gb * s3_std_gb_month`
+  
+Note: `vpce_base_per_az` is auto-derived as `8 x environments` and is not prompted for confirmation.
 - Prompt defaults: `tgw_attachments=1`, `tgw_data_gb=100`, `Number of Environments=1`, `vpce_base_per_az=8 × environments`, `vpce_extra_per_az=0`, `vpce_azs=2`, `vpce_data_gb` defaults to `tgw_data_gb`, `gitrunner_instance_type=t3.medium`, `gitrunner_count=1`, `gitrunner_os_gb=256`, `tf_backend_s3_gb=1`.
 
 Enhancement: Number of Environments and dynamic VPCE default
+Update: The tool now derives "Base Interface Endpoints per AZ (core services)" automatically as 8 x environments (no confirmation prompt).
 - Add a new prompt before VPCE questions: `Number of Environments?` (numeric input).
 - Use this value to compute the default for `Base Interface Endpoints per AZ (core services)` as `8 × <Number of Environments>`.
   - Example: if Number of Environments = `2`, the default shown becomes `16`.
